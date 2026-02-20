@@ -534,3 +534,72 @@ func (c *ManticoreClient) GetTableCount(ctx context.Context, tableName string) (
 
 	return 0, nil
 }
+
+// BulkUpdateGeonames обновляет поля в geonames пачкой
+func (c *ManticoreClient) BulkUpdateGeonames(ctx context.Context, updates []map[string]interface{}) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Создаем NDJSON буфер
+	var buf bytes.Buffer
+
+	for _, update := range updates {
+		id, ok := update["id"]
+		if !ok {
+			continue
+		}
+
+		// Удаляем id из документа для обновления
+		doc := make(map[string]interface{})
+		for k, v := range update {
+			if k != "id" {
+				doc[k] = v
+			}
+		}
+
+		updateCmd := map[string]interface{}{
+			"update": map[string]interface{}{
+				"table": TableGeonames,
+				"id":    id,
+				"doc":   doc,
+			},
+		}
+
+		cmdBytes, err := json.Marshal(updateCmd)
+		if err != nil {
+			return fmt.Errorf("failed to marshal update command: %w", err)
+		}
+
+		buf.Write(cmdBytes)
+		buf.WriteByte('\n')
+	}
+
+	return c.bulkRequest(ctx, buf.Bytes())
+}
+
+// bulkRequest выполняет HTTP запрос к Manticore
+func (c *ManticoreClient) bulkRequest(ctx context.Context, data []byte) error {
+	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9309)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-ndjson")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("bulk request returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}

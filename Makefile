@@ -34,3 +34,19 @@ logs:
 # Проверка статуса
 status:
 	curl http://localhost:9309/cli?sql=SHOW%20TABLES
+
+# Построение иерархии
+hierarchy:
+	go run cmd/build_hierarchy/main.go
+
+# Проверка статуса иерархии
+hierarchy-status:
+	@echo "Top level objects (continents and countries):"
+	@curl -s -X POST http://localhost:9309/sql \
+		-H "Content-Type: text/plain" \
+		-d "SELECT id, name, feature_code FROM geonames WHERE feature_code IN ('CONT', 'PCLI') LIMIT 10" | jq .
+	
+	@echo "\nHierarchy relations count:"
+	@curl -s -X POST http://localhost:9309/sql \
+		-H "Content-Type: text/plain" \
+		-d "SELECT COUNT(*) FROM hierarchy" | jq .

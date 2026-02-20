@@ -43,6 +43,9 @@ func (i *Importer) Run(ctx context.Context) error {
 		"allCountries.zip",
 		"alternateNamesV2.zip",
 		"hierarchy.zip",
+		"admin1CodesASCII.txt",
+		"admin2Codes.txt",
+		"adminCode5.zip", // опционально
 		// admin коды будем обрабатывать отдельно при построении иерархии
 	}
 
@@ -130,11 +133,13 @@ func (i *Importer) importFile(ctx context.Context, filename string) error {
 }
 
 func (i *Importer) buildHierarchy(ctx context.Context) error {
-	// TODO: Реализовать построение иерархии
-	// 1. Загрузить admin коды из admin1CodesASCII.txt и admin2Codes.txt
-	// 2. Построить связи на основе admin кодов
-	// 3. Объединить с данными из hierarchy.zip
-	// 4. Обновить parent_id и hierarchy_path в geonames
-	log.Println("Hierarchy building not yet implemented")
+	log.Println("Building hierarchy...")
+
+	builder := NewHierarchyBuilder(i.cfg, i.manticore)
+	if err := builder.BuildHierarchy(ctx); err != nil {
+		return fmt.Errorf("failed to build hierarchy: %w", err)
+	}
+
+	log.Println("Hierarchy built successfully")
 	return nil
 }

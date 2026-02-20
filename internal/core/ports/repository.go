@@ -26,6 +26,9 @@ type GeonameRepository interface {
 	// Административные операции
 	Count(ctx context.Context) (int64, error)
 	Truncate(ctx context.Context) error
+
+	// BulkUpdateGeonames обновляет геонимы пачкой
+	BulkUpdateGeonames(ctx context.Context, updates []map[string]interface{}) error
 }
 
 // AlternateNameRepository определяет порт для работы с альтернативными именами
