@@ -34,14 +34,15 @@ func NewBaseParser(cfg *config.Config) *BaseParser {
 	}
 }
 
-// TSVReader creates a TSV reader with proper settings
+// TSVReader creates a TSV reader with proper settings for GeoNames format
 func (p *BaseParser) TSVReader(file *os.File) *csv.Reader {
 	reader := csv.NewReader(bufio.NewReader(file))
 	reader.Comma = '\t'
 	reader.Comment = '#' // Игнорируем комментарии
 	reader.LazyQuotes = true
-	reader.ReuseRecord = true
 	reader.TrimLeadingSpace = true
+	reader.FieldsPerRecord = -1 // Разрешаем переменное количество полей
+	reader.ReuseRecord = true
 	return reader
 }
 
@@ -83,9 +84,10 @@ func (p *BaseParser) SplitComma(s string) []string {
 	return strings.Split(s, ",")
 }
 
-// ParseInt parses integer, handling empty case
+// ParseInt parses integer, handling empty case and special characters
 func (p *BaseParser) ParseInt(s string) (int64, error) {
-	if s == "" || s == "0" || s == "\\N" { // GeoNames использует \N для NULL
+	s = strings.TrimSpace(s)
+	if s == "" || s == "0" || s == "\\N" || s == "P" {
 		return 0, nil
 	}
 	var val int64
@@ -95,10 +97,16 @@ func (p *BaseParser) ParseInt(s string) (int64, error) {
 
 // ParseFloat parses float, handling empty case
 func (p *BaseParser) ParseFloat(s string) (float64, error) {
+	s = strings.TrimSpace(s)
 	if s == "" || s == "\\N" {
 		return 0, nil
 	}
 	var val float64
 	_, err := fmt.Sscanf(s, "%f", &val)
+	if err != nil {
+		// Пробуем заменить запятую на точку, если есть
+		s = strings.Replace(s, ",", ".", -1)
+		_, err = fmt.Sscanf(s, "%f", &val)
+	}
 	return val, err
 }
