@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -231,20 +232,14 @@ func (c *ManticoreClient) BulkInsertAlternateNames(ctx context.Context, altNames
 }
 
 // BulkInsertHierarchyRelations вставляет связи иерархии пачкой
-func (c *ManticoreClient) BulkInsertHierarchyRelations(ctx context.Context, relations []*domain.HierarchyRelation) error {
-	if len(relations) == 0 {
+func (c *ManticoreClient) BulkInsertHierarchyRelations(ctx context.Context, docs []map[string]interface{}) error {
+	if len(docs) == 0 {
 		return nil
 	}
 
-	docs := make([]map[string]interface{}, len(relations))
-	for i, r := range relations {
-		docs[i] = hierarchyRelationToMap(r)
-	}
+	// Создаем таблицу для иерархии если не существует
+	hierarchyTable := "hierarchy"
 
-	// Создаем временную таблицу для иерархии
-	hierarchyTable := "hierarchy_relations"
-
-	// Проверяем существование таблицы
 	exists, err := c.TableExists(ctx, hierarchyTable)
 	if err != nil {
 		return err
@@ -261,7 +256,7 @@ func (c *ManticoreClient) BulkInsertHierarchyRelations(ctx context.Context, rela
 
 // createHierarchyTable создает таблицу для иерархии
 func (c *ManticoreClient) createHierarchyTable(ctx context.Context) error {
-	sql := `CREATE TABLE IF NOT EXISTS hierarchy_relations (
+	sql := `CREATE TABLE IF NOT EXISTS hierarchy (
         id bigint,
         parent_id bigint,
         child_id bigint,
@@ -271,11 +266,18 @@ func (c *ManticoreClient) createHierarchyTable(ctx context.Context) error {
     )`
 
 	req := c.client.UtilsAPI.Sql(ctx).Body(sql)
-	_, _, err := c.client.UtilsAPI.SqlExecute(req)
+	req = req.RawResponse(true)
+
+	_, httpResp, err := c.client.UtilsAPI.SqlExecute(req)
 	if err != nil {
 		return fmt.Errorf("failed to create hierarchy table: %w", err)
 	}
 
+	if httpResp != nil && httpResp.StatusCode != 200 {
+		return fmt.Errorf("create hierarchy table returned HTTP %d", httpResp.StatusCode)
+	}
+
+	log.Println("Created hierarchy table")
 	return nil
 }
 
@@ -289,21 +291,33 @@ func (c *ManticoreClient) bulkInsert(ctx context.Context, table string, docs []m
 	var buf bytes.Buffer
 
 	for _, doc := range docs {
-		// Удаляем id из doc, так как он будет передан отдельно
+		// Проверяем, есть ли поле id
+		hasID := false
+		idVal := doc["id"]
+
+		// Создаем копию документа без id для поля doc
 		docWithoutID := make(map[string]interface{})
 		for k, v := range doc {
 			if k != "id" {
 				docWithoutID[k] = v
+			} else {
+				hasID = true
 			}
 		}
 
-		// Создаем команду insert в формате NDJSON
+		// Создаем команду insert
+		insertObj := map[string]interface{}{
+			"table": table,
+			"doc":   docWithoutID,
+		}
+
+		// Добавляем id только если он явно указан
+		if hasID {
+			insertObj["id"] = idVal
+		}
+
 		insertCmd := map[string]interface{}{
-			"insert": map[string]interface{}{
-				"table": table,
-				"id":    doc["id"],    // id передается здесь
-				"doc":   docWithoutID, // документ без id
-			},
+			"insert": insertObj,
 		}
 
 		cmdBytes, err := json.Marshal(insertCmd)
@@ -350,14 +364,8 @@ func (c *ManticoreClient) bulkInsert(ctx context.Context, table string, docs []m
 
 	// Проверяем на ошибки
 	if errors, ok := response["errors"]; ok && errors == true {
-		if items, ok := response["items"].([]interface{}); ok && len(items) > 0 {
-			if item, ok := items[0].(map[string]interface{}); ok {
-				if insert, ok := item["insert"].(map[string]interface{}); ok {
-					if errMsg, ok := insert["error"]; ok {
-						return fmt.Errorf("bulk insert error: %v", errMsg)
-					}
-				}
-			}
+		if error, ok := response["error"]; ok && error != nil {
+			return fmt.Errorf("bulk insert error: %v", error)
 		}
 		return fmt.Errorf("bulk insert completed with errors: %v", response)
 	}

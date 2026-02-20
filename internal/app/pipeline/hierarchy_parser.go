@@ -4,24 +4,25 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/terratensor/geomantic/internal/adapters/repositories/manticore"
 	"github.com/terratensor/geomantic/internal/config"
-	"github.com/terratensor/geomantic/internal/core/domain"
 )
 
 // HierarchyParser handles parsing of hierarchy.txt
 type HierarchyParser struct {
 	*BaseParser
-	batchChan chan []*domain.HierarchyRelation
+	batchChan chan []map[string]interface{}
 }
 
 func NewHierarchyParser(cfg *config.Config) *HierarchyParser {
 	return &HierarchyParser{
 		BaseParser: NewBaseParser(cfg),
-		batchChan:  make(chan []*domain.HierarchyRelation, cfg.ChannelBufferSize),
+		batchChan:  make(chan []map[string]interface{}, cfg.ChannelBufferSize),
 	}
 }
 
@@ -33,8 +34,10 @@ func (p *HierarchyParser) ProcessFile(ctx context.Context, filePath string, clie
 	}
 	defer file.Close()
 
+	log.Printf("Processing hierarchy file: %s", filepath.Base(filePath))
+
 	// Create progress bar
-	bar, err := p.ProgressBar(file, fmt.Sprintf("Processing %s", filePath))
+	bar, err := p.ProgressBar(file, fmt.Sprintf("Processing %s", filepath.Base(filePath)))
 	if err != nil {
 		return 0, err
 	}
@@ -42,15 +45,18 @@ func (p *HierarchyParser) ProcessFile(ctx context.Context, filePath string, clie
 	// Start worker goroutines
 	errChan := make(chan error, p.workers)
 	var processed int64
+	var parseErrors int64
 
 	// Start consumer goroutine
 	go p.startConsumer(ctx, client, errChan, &processed)
 
 	// Create TSV reader
 	reader := p.TSVReader(file)
+	reader.FieldsPerRecord = -1
+	reader.Comment = 0
 
 	// Read and parse records
-	batch := make([]*domain.HierarchyRelation, 0, p.batchSize)
+	batch := make([]map[string]interface{}, 0, p.batchSize)
 	var lineCount int64
 
 	for {
@@ -59,32 +65,40 @@ func (p *HierarchyParser) ProcessFile(ctx context.Context, filePath string, clie
 			break
 		}
 		if err != nil {
-			return processed, fmt.Errorf("error reading record: %w", err)
+			parseErrors++
+			if parseErrors%1000 == 0 {
+				log.Printf("Warning: %d parse errors in hierarchy, last error: %v", parseErrors, err)
+			}
+			continue
 		}
 
 		// Update progress bar
 		bar.Add(len(strings.Join(record, "\t")) + 1)
 
 		// Skip empty lines
-		if len(record) == 0 || (len(record) == 1 && record[0] == "") {
+		if len(record) < 2 {
+			parseErrors++
 			continue
 		}
 
-		// Parse hierarchy relation
-		relation, err := p.parseHierarchyRelation(record)
+		// Parse hierarchy relation into map for Manticore (без id)
+		doc, err := p.parseHierarchyToMap(record)
 		if err != nil {
-			fmt.Printf("Warning: failed to parse record at line %d: %v\n", lineCount+1, err)
+			parseErrors++
+			if parseErrors%1000 == 0 {
+				log.Printf("Warning: failed to parse hierarchy at line %d: %v", lineCount+1, err)
+			}
 			continue
 		}
 
-		batch = append(batch, relation)
+		batch = append(batch, doc)
 		lineCount++
 
 		// Send batch if full
 		if len(batch) >= p.batchSize {
 			select {
 			case p.batchChan <- batch:
-				batch = make([]*domain.HierarchyRelation, 0, p.batchSize)
+				batch = make([]map[string]interface{}, 0, p.batchSize)
 			case <-ctx.Done():
 				return processed, ctx.Err()
 			}
@@ -113,11 +127,16 @@ func (p *HierarchyParser) ProcessFile(ctx context.Context, filePath string, clie
 		return processed, ctx.Err()
 	}
 
+	if parseErrors > 0 {
+		log.Printf("Completed hierarchy with %d parse errors", parseErrors)
+	}
+
 	return lineCount, nil
 }
 
 // startConsumer consumes batches and inserts into Manticore
 func (p *HierarchyParser) startConsumer(ctx context.Context, client *manticore.ManticoreClient, errChan chan error, processed *int64) {
+	batchCount := 0
 	for batch := range p.batchChan {
 		select {
 		case <-ctx.Done():
@@ -129,17 +148,17 @@ func (p *HierarchyParser) startConsumer(ctx context.Context, client *manticore.M
 				return
 			}
 			*processed += int64(len(batch))
+			batchCount++
+			if batchCount%10 == 0 {
+				log.Printf("Inserted %d hierarchy records so far...", *processed)
+			}
 		}
 	}
 	errChan <- nil
 }
 
-// parseHierarchyRelation parses a TSV record into a HierarchyRelation struct
-func (p *HierarchyParser) parseHierarchyRelation(record []string) (*domain.HierarchyRelation, error) {
-	if len(record) < 2 {
-		return nil, fmt.Errorf("invalid record length: %d", len(record))
-	}
-
+// parseHierarchyToMap parses a TSV record into a map for Manticore (без id)
+func (p *HierarchyParser) parseHierarchyToMap(record []string) (map[string]interface{}, error) {
 	// Parse parent ID
 	parentID, err := p.ParseInt(record[0])
 	if err != nil {
@@ -155,15 +174,17 @@ func (p *HierarchyParser) parseHierarchyRelation(record []string) (*domain.Hiera
 	// Parse relation type (optional)
 	relationType := ""
 	if len(record) >= 3 {
-		relationType = record[2]
+		relationType = strings.TrimSpace(record[2])
 	}
 
-	// Create hierarchy relation
-	relation := &domain.HierarchyRelation{
-		ParentID:     parentID,
-		ChildID:      childID,
-		RelationType: relationType,
+	// Create document WITHOUT id - Manticore сгенерирует сама
+	doc := map[string]interface{}{
+		"parent_id":       parentID,
+		"child_id":        childID,
+		"relation_type":   relationType,
+		"is_admin":        relationType == "ADM",
+		"is_user_defined": relationType != "ADM" && relationType != "",
 	}
 
-	return relation, nil
+	return doc, nil
 }
