@@ -21,8 +21,9 @@ const (
 )
 
 var CreateTablesSQL = []string{
-	// Таблица геонимов
+	// Таблица геонимов с полной схемой
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+        id bigint,
         name text,
         asciiname string indexed,
         alternatenames text,
@@ -54,6 +55,7 @@ var CreateTablesSQL = []string{
 
 	// Таблица альтернативных имен
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+        id bigint,
         geonameid bigint,
         isolanguage string indexed,
         alternatename text,
@@ -69,6 +71,26 @@ var CreateTablesSQL = []string{
     morphology='lemmatize_ru_all, stem_enru'
     min_infix_len='2'
     index_exact_words='1'`, TableAlternateNames),
+
+	// Таблица иерархии
+	`CREATE TABLE IF NOT EXISTS hierarchy (
+        id bigint,
+        parent_id bigint,
+        child_id bigint,
+        relation_type string,
+        is_admin bool,
+        is_user_defined bool
+    )`,
+
+	// Таблица для материализованных путей (опционально)
+	`CREATE TABLE IF NOT EXISTS hierarchy_paths (
+        id bigint,
+        geoname_id bigint,
+        path string,
+        path_ids string,
+        depth int,
+        root_id bigint
+    )`,
 }
 
 type ManticoreClient struct {
