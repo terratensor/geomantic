@@ -17,19 +17,19 @@ update:
 # Очистка данных
 clean:
 	rm -rf data/*
-	docker-compose -f docker/docker-compose.yml down -v
+	docker compose -f docker/docker-compose.yml down -v
 
 # Запуск Manticore
 docker-up:
-	docker-compose -f docker/docker-compose.yml up -d
+	docker compose -f docker/docker-compose.yml up -d
 
 # Остановка Manticore
 docker-down:
-	docker-compose -f docker/docker-compose.yml down
+	docker compose -f docker/docker-compose.yml down
 
 # Логи
 logs:
-	docker-compose -f docker/docker-compose.yml logs -f
+	docker compose -f docker/docker-compose.yml logs -f
 
 # Проверка статуса
 status:

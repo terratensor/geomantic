@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -40,7 +41,6 @@ var CreateTablesSQL = []string{
         dem int,
         timezone string,
         modification_date timestamp,
-        location geopoint,
         parent_id bigint,
         hierarchy_path string,
         full_text text
@@ -96,28 +96,33 @@ func NewClient(host string, port int) (*ManticoreClient, error) {
 	}, nil
 }
 
+// InitSchema создает таблицы если они не существуют
 func (c *ManticoreClient) InitSchema(ctx context.Context) error {
 	for _, sql := range CreateTablesSQL {
+		// Для создания таблиц нужно использовать POST запрос к /sql
 		req := c.client.UtilsAPI.Sql(ctx).Body(sql)
-		// Для CREATE TABLE используем rawResponse=true
 		req = req.RawResponse(true)
 
 		resp, httpResp, err := c.client.UtilsAPI.SqlExecute(req)
 		if err != nil {
+			// Проверим детали ошибки
+			if httpResp != nil {
+				body, _ := io.ReadAll(httpResp.Body)
+				return fmt.Errorf("failed to execute SQL: %w, response: %s", err, string(body))
+			}
 			return fmt.Errorf("failed to execute SQL: %w", err)
 		}
 
-		// Проверяем HTTP статус
 		if httpResp != nil && httpResp.StatusCode != 200 {
 			return fmt.Errorf("init schema returned HTTP %d", httpResp.StatusCode)
 		}
 
-		// Получаем Hits из ответа
-		hits := resp.SqlObjResponse.GetHits()
-
 		// Проверяем наличие ошибок в ответе
-		if error, ok := hits["error"]; ok && error != nil {
-			return fmt.Errorf("SQL error: %v", error)
+		if resp != nil && resp.SqlObjResponse != nil {
+			hits := resp.SqlObjResponse.GetHits()
+			if error, ok := hits["error"]; ok && error != nil {
+				return fmt.Errorf("SQL error: %v", error)
+			}
 		}
 	}
 	return nil
@@ -144,7 +149,6 @@ func geonameToMap(g *domain.Geoname) map[string]interface{} {
 		"dem":               g.DEM,
 		"timezone":          g.Timezone,
 		"modification_date": g.ModificationDate.Unix(),
-		"location":          fmt.Sprintf("%f,%f", g.Latitude, g.Longitude),
 		"full_text":         g.FullText(),
 	}
 
