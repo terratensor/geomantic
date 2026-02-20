@@ -17,7 +17,6 @@ type Importer struct {
 	cfg        *config.Config
 	downloader *downloader.Downloader
 	manticore  *manticore.ManticoreClient
-	parser     *pipeline.Parser
 }
 
 func NewImporter(cfg *config.Config) *Importer {
@@ -42,9 +41,8 @@ func (i *Importer) Run(ctx context.Context) error {
 	files := []string{
 		"allCountries.zip",
 		"alternateNamesV2.zip",
-		"admin1CodesASCII.txt",
-		"admin2Codes.txt",
 		"hierarchy.zip",
+		// admin коды будем обрабатывать отдельно при построении иерархии
 	}
 
 	// Импортируем каждый файл
@@ -75,9 +73,6 @@ func (i *Importer) initComponents(ctx context.Context) error {
 		return fmt.Errorf("failed to create manticore client: %w", err)
 	}
 
-	// Создаём парсер
-	i.parser = pipeline.NewParser(i.cfg)
-
 	return nil
 }
 
@@ -91,30 +86,30 @@ func (i *Importer) importFile(ctx context.Context, filename string) error {
 	}
 
 	// Распаковываем если нужно
-	if filename[len(filename)-4:] == ".zip" {
+	if filepath.Ext(filename) == ".zip" {
 		localPath, err = i.downloader.ExtractZip(localPath)
 		if err != nil {
 			return fmt.Errorf("failed to extract: %w", err)
 		}
 	}
 
-	// Определяем тип файла и соответствующий обработчик
-	var processor func(context.Context, string, *manticore.ManticoreClient) (int64, error)
+	// Определяем тип файла и соответствующий парсер
+	var parser pipeline.Parser
 
 	switch filename {
 	case "allCountries.zip":
-		processor = i.processGeonames
+		parser = pipeline.NewGeonameParser(i.cfg)
 	case "alternateNamesV2.zip":
-		processor = i.processAlternateNames
+		parser = pipeline.NewAlternateNameParser(i.cfg)
 	case "hierarchy.zip":
-		processor = i.processHierarchy
+		parser = pipeline.NewHierarchyParser(i.cfg)
 	default:
-		processor = i.processGeneric
+		return fmt.Errorf("unknown file type: %s", filename)
 	}
 
 	// Парсим и импортируем
 	start := time.Now()
-	count, err := processor(ctx, localPath, i.manticore)
+	count, err := parser.ProcessFile(ctx, localPath, i.manticore)
 	if err != nil {
 		return fmt.Errorf("failed to process: %w", err)
 	}
@@ -123,35 +118,12 @@ func (i *Importer) importFile(ctx context.Context, filename string) error {
 	return nil
 }
 
-// processGeonames обрабатывает файл с геонимами
-func (i *Importer) processGeonames(ctx context.Context, filePath string, client *manticore.ManticoreClient) (int64, error) {
-	parser := pipeline.NewGeonameParser(i.cfg)
-	return parser.ProcessFile(ctx, filePath, client)
-}
-
-// processAlternateNames обрабатывает файл с альтернативными именами
-func (i *Importer) processAlternateNames(ctx context.Context, filePath string, client *manticore.ManticoreClient) (int64, error) {
-	parser := pipeline.NewAlternateNameParser(i.cfg)
-	return parser.ProcessFile(ctx, filePath, client)
-}
-
-// processHierarchy обрабатывает файл иерархии
-func (i *Importer) processHierarchy(ctx context.Context, filePath string, client *manticore.ManticoreClient) (int64, error) {
-	parser := pipeline.NewHierarchyParser(i.cfg)
-	return parser.ProcessFile(ctx, filePath, client)
-}
-
-// processGeneric для остальных файлов (admin коды и т.д.)
-func (i *Importer) processGeneric(ctx context.Context, filePath string, client *manticore.ManticoreClient) (int64, error) {
-	// Для admin кодов пока просто логируем
-	log.Printf("Skipping import for %s - will be used for hierarchy building", filepath.Base(filePath))
-	return 0, nil
-}
-
 func (i *Importer) buildHierarchy(ctx context.Context) error {
 	// TODO: Реализовать построение иерархии
-	// 1. Загрузить admin коды
-	// 2. Построить связи
-	// 3. Обновить parent_id в geonames
+	// 1. Загрузить admin коды из admin1CodesASCII.txt и admin2Codes.txt
+	// 2. Построить связи на основе admin кодов
+	// 3. Объединить с данными из hierarchy.zip
+	// 4. Обновить parent_id и hierarchy_path в geonames
+	log.Println("Hierarchy building not yet implemented")
 	return nil
 }
