@@ -1,0 +1,32 @@
+services:
+  manticore:
+    image: manticoresearch/manticore:latest
+    container_name: geomantic-manticore
+    restart: always
+    ports:
+      - "9307:9306"
+      - "9309:9308"
+      - "9313:9312"
+    networks:
+      - library-net
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      - EXTRA=1
+    volumes:
+      - manticore-data:/var/lib/manticore      
+      - ./manticore/conf/manticore.conf:/etc/manticoresearch/manticore.conf
+
+volumes:
+  manticore-data:
+
+networks:
+  library-net:
+    name: library-net
+    driver: bridge
