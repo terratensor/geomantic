@@ -85,7 +85,7 @@ func (p *BaseParser) SplitComma(s string) []string {
 
 // ParseInt parses integer, handling empty case
 func (p *BaseParser) ParseInt(s string) (int64, error) {
-	if s == "" || s == "0" {
+	if s == "" || s == "0" || s == "\\N" { // GeoNames использует \N для NULL
 		return 0, nil
 	}
 	var val int64
@@ -95,7 +95,7 @@ func (p *BaseParser) ParseInt(s string) (int64, error) {
 
 // ParseFloat parses float, handling empty case
 func (p *BaseParser) ParseFloat(s string) (float64, error) {
-	if s == "" {
+	if s == "" || s == "\\N" {
 		return 0, nil
 	}
 	var val float64

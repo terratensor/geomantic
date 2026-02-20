@@ -22,7 +22,6 @@ const (
 var CreateTablesSQL = []string{
 	// Таблица геонимов
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-        id bigint,
         name text,
         asciiname string indexed,
         alternatenames text,
@@ -54,7 +53,6 @@ var CreateTablesSQL = []string{
 
 	// Таблица альтернативных имен
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-        id bigint,
         geonameid bigint,
         isolanguage string indexed,
         alternatename text,
@@ -131,7 +129,7 @@ func (c *ManticoreClient) InitSchema(ctx context.Context) error {
 // geonameToMap конвертирует доменную модель в map для Manticore
 func geonameToMap(g *domain.Geoname) map[string]interface{} {
 	doc := map[string]interface{}{
-		"id":                g.ID,
+		"id":                g.ID, // id обязательно должен быть
 		"name":              g.Name,
 		"asciiname":         g.ASCIIName,
 		"alternatenames":    strings.Join(g.AlternateNames, ","),
@@ -291,12 +289,20 @@ func (c *ManticoreClient) bulkInsert(ctx context.Context, table string, docs []m
 	var buf bytes.Buffer
 
 	for _, doc := range docs {
+		// Удаляем id из doc, так как он будет передан отдельно
+		docWithoutID := make(map[string]interface{})
+		for k, v := range doc {
+			if k != "id" {
+				docWithoutID[k] = v
+			}
+		}
+
 		// Создаем команду insert в формате NDJSON
 		insertCmd := map[string]interface{}{
 			"insert": map[string]interface{}{
 				"table": table,
-				"id":    doc["id"],
-				"doc":   doc,
+				"id":    doc["id"],    // id передается здесь
+				"doc":   docWithoutID, // документ без id
 			},
 		}
 
@@ -309,39 +315,51 @@ func (c *ManticoreClient) bulkInsert(ctx context.Context, table string, docs []m
 		buf.WriteByte('\n')
 	}
 
-	// Отправляем bulk запрос
-	req := c.client.IndexAPI.Bulk(ctx).Body(buf.String())
-	resp, httpResp, err := c.client.IndexAPI.BulkExecute(req)
+	// Делаем прямой HTTP запрос
+	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9309)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
 	if err != nil {
-		return fmt.Errorf("failed to execute bulk insert: %w", err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Проверяем HTTP статус
-	if httpResp != nil && httpResp.StatusCode != 200 {
-		return fmt.Errorf("bulk insert returned HTTP %d", httpResp.StatusCode)
+	req.Header.Set("Content-Type", "application/x-ndjson")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Читаем ответ
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Проверяем глобальную ошибку
-	if resp.Error != nil && *resp.Error != "" {
-		return fmt.Errorf("bulk insert returned error: %s", *resp.Error)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("bulk insert returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Проверяем флаг Errors
-	if resp.Errors != nil && *resp.Errors {
-		// Логируем детали ошибок для каждого элемента
-		if resp.Items != nil {
-			for i, item := range resp.Items { // Убрано лишнее *
-				// item это map[string]interface{}, проверяем наличие ключа "insert"
-				if insert, ok := item["insert"]; ok {
-					if insertMap, ok := insert.(map[string]interface{}); ok {
-						if errMsg, hasErr := insertMap["error"]; hasErr && errMsg != nil {
-							return fmt.Errorf("bulk insert item %d error: %v", i, errMsg)
-						}
+	// Парсим ответ
+	var response map[string]interface{}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Проверяем на ошибки
+	if errors, ok := response["errors"]; ok && errors == true {
+		if items, ok := response["items"].([]interface{}); ok && len(items) > 0 {
+			if item, ok := items[0].(map[string]interface{}); ok {
+				if insert, ok := item["insert"].(map[string]interface{}); ok {
+					if errMsg, ok := insert["error"]; ok {
+						return fmt.Errorf("bulk insert error: %v", errMsg)
 					}
 				}
 			}
 		}
-		return fmt.Errorf("bulk insert completed with errors")
+		return fmt.Errorf("bulk insert completed with errors: %v", response)
 	}
 
 	return nil

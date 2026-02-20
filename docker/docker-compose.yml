@@ -7,8 +7,6 @@ services:
       - "9307:9306"
       - "9309:9308"
       - "9313:9312"
-    networks:
-      - library-net
     ulimits:
       nproc: 65535
       nofile:
@@ -25,8 +23,3 @@ services:
 
 volumes:
   manticore-data:
-
-networks:
-  library-net:
-    name: library-net
-    driver: bridge

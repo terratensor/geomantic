@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/terratensor/geomantic/internal/adapters/repositories/manticore"
 	"github.com/terratensor/geomantic/internal/config"
@@ -42,12 +44,14 @@ func (p *GeonameParser) ProcessFile(ctx context.Context, filePath string, client
 	// Start worker goroutines
 	errChan := make(chan error, p.workers)
 	var processed int64
+	var parseErrors int64
 
 	// Start consumer goroutine
 	go p.startConsumer(ctx, client, errChan, &processed)
 
-	// Create TSV reader
+	// Create TSV reader with more flexible settings
 	reader := p.TSVReader(file)
+	reader.FieldsPerRecord = -1 // Разрешить переменное количество полей
 
 	// Read and parse records
 	batch := make([]*domain.Geoname, 0, p.batchSize)
@@ -59,7 +63,12 @@ func (p *GeonameParser) ProcessFile(ctx context.Context, filePath string, client
 			break
 		}
 		if err != nil {
-			return processed, fmt.Errorf("error reading record: %w", err)
+			// Пропускаем проблемные строки но продолжаем
+			parseErrors++
+			if parseErrors%1000 == 0 {
+				log.Printf("Warning: %d parse errors so far, last error: %v", parseErrors, err)
+			}
+			continue
 		}
 
 		// Update progress bar based on bytes read (approximate)
@@ -68,8 +77,10 @@ func (p *GeonameParser) ProcessFile(ctx context.Context, filePath string, client
 		// Parse geoname from record
 		geoname, err := p.parseGeoname(record)
 		if err != nil {
-			// Log error but continue processing
-			fmt.Printf("Warning: failed to parse record at line %d: %v\n", lineCount+1, err)
+			parseErrors++
+			if parseErrors%1000 == 0 {
+				log.Printf("Warning: failed to parse record at line %d: %v", lineCount+1, err)
+			}
 			continue
 		}
 
@@ -109,22 +120,33 @@ func (p *GeonameParser) ProcessFile(ctx context.Context, filePath string, client
 		return processed, ctx.Err()
 	}
 
+	if parseErrors > 0 {
+		log.Printf("Completed with %d parse errors", parseErrors)
+	}
+
 	return lineCount, nil
 }
 
 // startConsumer consumes batches and inserts into Manticore
 func (p *GeonameParser) startConsumer(ctx context.Context, client *manticore.ManticoreClient, errChan chan error, processed *int64) {
+	batchCount := 0
 	for batch := range p.batchChan {
 		select {
 		case <-ctx.Done():
 			errChan <- ctx.Err()
 			return
 		default:
+			// Пытаемся вставить batch, если ошибка - логируем и продолжаем со следующим
 			if err := client.BulkInsertGeonames(ctx, batch); err != nil {
-				errChan <- fmt.Errorf("failed to insert batch: %w", err)
-				return
+				log.Printf("Warning: failed to insert batch of %d records: %v", len(batch), err)
+				// Можно сохранить проблемный batch для анализа
+				continue
 			}
 			*processed += int64(len(batch))
+			batchCount++
+			if batchCount%10 == 0 {
+				log.Printf("Inserted %d records so far...", *processed)
+			}
 		}
 	}
 	errChan <- nil
@@ -132,77 +154,102 @@ func (p *GeonameParser) startConsumer(ctx context.Context, client *manticore.Man
 
 // parseGeoname parses a TSV record into a Geoname struct
 func (p *GeonameParser) parseGeoname(record []string) (*domain.Geoname, error) {
-	if len(record) < 19 {
-		return nil, fmt.Errorf("invalid record length: %d", len(record))
+	// В GeoNames файле может быть от 4 до 19 полей
+	// Минимально нужно: id, name, latitude, longitude
+	if len(record) < 5 {
+		return nil, fmt.Errorf("record too short: %d fields", len(record))
 	}
 
-	// Parse ID
+	// Parse ID (обязательное поле)
 	id, err := p.ParseInt(record[0])
 	if err != nil {
-		return nil, fmt.Errorf("invalid ID: %w", err)
+		return nil, fmt.Errorf("invalid ID '%s': %w", record[0], err)
 	}
 
-	// Parse coordinates
-	lat, err := p.ParseFloat(record[4])
+	// Parse coordinates (обязательные поля)
+	lat, err := p.ParseFloat(safeString(record, 4))
 	if err != nil {
 		return nil, fmt.Errorf("invalid latitude: %w", err)
 	}
 
-	lon, err := p.ParseFloat(record[5])
+	lon, err := p.ParseFloat(safeString(record, 5))
 	if err != nil {
 		return nil, fmt.Errorf("invalid longitude: %w", err)
 	}
 
-	// Parse population
-	population, err := p.ParseInt(record[14])
-	if err != nil {
-		return nil, fmt.Errorf("invalid population: %w", err)
-	}
-
-	// Parse DEM
-	dem, err := p.ParseInt(record[16])
-	if err != nil {
-		return nil, fmt.Errorf("invalid DEM: %w", err)
-	}
+	// Опциональные поля с значениями по умолчанию
+	population, _ := p.ParseInt(safeString(record, 14))
+	dem, _ := p.ParseInt(safeString(record, 16))
 
 	// Parse elevation (optional)
 	var elevation *int
-	if record[15] != "" && record[15] != "0" {
-		elev, err := p.ParseInt(record[15])
-		if err == nil {
+	if elevStr := safeString(record, 15); elevStr != "" && elevStr != "0" && elevStr != "\\N" {
+		elev, err := p.ParseInt(elevStr)
+		if err == nil && elev > 0 {
 			e := int(elev)
 			elevation = &e
 		}
 	}
 
 	// Parse modification date
-	modDate, err := p.ParseDate(record[18])
-	if err != nil {
-		return nil, fmt.Errorf("invalid modification date: %w", err)
+	var modDate time.Time
+	if dateStr := safeString(record, 18); dateStr != "" && dateStr != "\\N" {
+		modDate, _ = p.ParseDate(dateStr)
 	}
 
-	// Create geoname
+	// Create geoname with safe defaults for missing fields
 	geoname := &domain.Geoname{
 		ID:               id,
-		Name:             record[1],
-		ASCIIName:        record[2],
-		AlternateNames:   p.SplitComma(record[3]),
+		Name:             safeString(record, 1),
+		ASCIIName:        safeString(record, 2),
+		AlternateNames:   splitAlternateNames(safeString(record, 3)),
 		Latitude:         lat,
 		Longitude:        lon,
-		FeatureClass:     record[6],
-		FeatureCode:      record[7],
-		CountryCode:      record[8],
-		CC2:              p.SplitComma(record[9]),
-		Admin1Code:       record[10],
-		Admin2Code:       record[11],
-		Admin3Code:       record[12],
-		Admin4Code:       record[13],
+		FeatureClass:     safeString(record, 6),
+		FeatureCode:      safeString(record, 7),
+		CountryCode:      safeString(record, 8),
+		CC2:              splitComma(safeString(record, 9)),
+		Admin1Code:       safeString(record, 10),
+		Admin2Code:       safeString(record, 11),
+		Admin3Code:       safeString(record, 12),
+		Admin4Code:       safeString(record, 13),
 		Population:       population,
 		Elevation:        elevation,
 		DEM:              int(dem),
-		Timezone:         record[17],
+		Timezone:         safeString(record, 17),
 		ModificationDate: modDate,
 	}
 
 	return geoname, nil
+}
+
+// Вспомогательные функции
+func safeString(record []string, index int) string {
+	if index < len(record) {
+		return strings.TrimSpace(record[index])
+	}
+	return ""
+}
+
+func splitComma(s string) []string {
+	if s == "" || s == "\\N" {
+		return []string{}
+	}
+	return strings.Split(s, ",")
+}
+
+func splitAlternateNames(s string) []string {
+	if s == "" || s == "\\N" {
+		return []string{}
+	}
+	// Удаляем возможные кавычки и лишние пробелы
+	s = strings.Trim(s, "\"")
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }

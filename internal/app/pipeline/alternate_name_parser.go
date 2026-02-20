@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/terratensor/geomantic/internal/adapters/repositories/manticore"
@@ -27,14 +29,22 @@ func NewAlternateNameParser(cfg *config.Config) *AlternateNameParser {
 
 // ProcessFile processes the alternate names file and imports into Manticore
 func (p *AlternateNameParser) ProcessFile(ctx context.Context, filePath string, client *manticore.ManticoreClient) (int64, error) {
+	// Определяем, какой файл обрабатываем
+	if strings.Contains(filePath, "iso-languagecodes.txt") {
+		log.Printf("Skipping language codes file: %s", filePath)
+		return 0, nil
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
+	log.Printf("Processing alternate names file: %s", filePath)
+
 	// Create progress bar
-	bar, err := p.ProgressBar(file, fmt.Sprintf("Processing %s", filePath))
+	bar, err := p.ProgressBar(file, fmt.Sprintf("Processing %s", filepath.Base(filePath)))
 	if err != nil {
 		return 0, err
 	}
@@ -42,12 +52,15 @@ func (p *AlternateNameParser) ProcessFile(ctx context.Context, filePath string, 
 	// Start worker goroutines
 	errChan := make(chan error, p.workers)
 	var processed int64
+	var parseErrors int64
 
 	// Start consumer goroutine
 	go p.startConsumer(ctx, client, errChan, &processed)
 
-	// Create TSV reader
+	// Create TSV reader with flexible settings
 	reader := p.TSVReader(file)
+	reader.FieldsPerRecord = -1 // Allow variable number of fields
+	reader.Comment = 0          // Disable comment skipping for this file
 
 	// Read and parse records
 	batch := make([]*domain.AlternateName, 0, p.batchSize)
@@ -59,16 +72,29 @@ func (p *AlternateNameParser) ProcessFile(ctx context.Context, filePath string, 
 			break
 		}
 		if err != nil {
-			return processed, fmt.Errorf("error reading record: %w", err)
+			parseErrors++
+			if parseErrors%1000 == 0 {
+				log.Printf("Warning: %d parse errors in alternate names, last error: %v", parseErrors, err)
+			}
+			continue
 		}
 
 		// Update progress bar
 		bar.Add(len(strings.Join(record, "\t")) + 1)
 
+		// Skip header or invalid records
+		if len(record) < 4 {
+			parseErrors++
+			continue
+		}
+
 		// Parse alternate name from record
 		altName, err := p.parseAlternateName(record)
 		if err != nil {
-			fmt.Printf("Warning: failed to parse record at line %d: %v\n", lineCount+1, err)
+			parseErrors++
+			if parseErrors%10000 == 0 {
+				log.Printf("Warning: failed to parse alternate name at line %d: %v", lineCount+1, err)
+			}
 			continue
 		}
 
@@ -108,6 +134,10 @@ func (p *AlternateNameParser) ProcessFile(ctx context.Context, filePath string, 
 		return processed, ctx.Err()
 	}
 
+	if parseErrors > 0 {
+		log.Printf("Completed alternate names with %d parse errors", parseErrors)
+	}
+
 	return lineCount, nil
 }
 
@@ -131,8 +161,9 @@ func (p *AlternateNameParser) startConsumer(ctx context.Context, client *mantico
 
 // parseAlternateName parses a TSV record into an AlternateName struct
 func (p *AlternateNameParser) parseAlternateName(record []string) (*domain.AlternateName, error) {
-	if len(record) < 11 {
-		return nil, fmt.Errorf("invalid record length: %d", len(record))
+	// Alternate names file can have 4 to 11 fields
+	if len(record) < 4 {
+		return nil, fmt.Errorf("record too short: %d fields", len(record))
 	}
 
 	// Parse ID
@@ -147,27 +178,54 @@ func (p *AlternateNameParser) parseAlternateName(record []string) (*domain.Alter
 		return nil, fmt.Errorf("invalid geonameID: %w", err)
 	}
 
-	// Parse boolean fields (columns 6-9 are isPreferredName, isShortName, isColloquial, isHistoric)
-	isPreferred := record[5] == "1"
-	isShort := record[6] == "1"
-	isColloquial := record[7] == "1"
-	isHistoric := record[8] == "1"
-
-	// Parse from/to periods (columns 9 and 10)
-	var from, to *string
-	if len(record) > 9 && record[9] != "" {
-		from = &record[9]
+	// ISO language (may be empty)
+	isoLang := ""
+	if len(record) > 2 {
+		isoLang = strings.TrimSpace(record[2])
 	}
-	if len(record) > 10 && record[10] != "" {
-		to = &record[10]
+
+	// Alternate name
+	altName := ""
+	if len(record) > 3 {
+		altName = strings.TrimSpace(record[3])
+	}
+
+	// Boolean fields (default to false)
+	isPreferred := false
+	if len(record) > 4 {
+		isPreferred = record[4] == "1"
+	}
+
+	isShort := false
+	if len(record) > 5 {
+		isShort = record[5] == "1"
+	}
+
+	isColloquial := false
+	if len(record) > 6 {
+		isColloquial = record[6] == "1"
+	}
+
+	isHistoric := false
+	if len(record) > 7 {
+		isHistoric = record[7] == "1"
+	}
+
+	// From/to periods
+	var from, to *string
+	if len(record) > 8 && record[8] != "" && record[8] != "\\N" {
+		from = &record[8]
+	}
+	if len(record) > 9 && record[9] != "" && record[9] != "\\N" {
+		to = &record[9]
 	}
 
 	// Create alternate name
-	altName := &domain.AlternateName{
+	altNameObj := &domain.AlternateName{
 		ID:              id,
 		GeonameID:       geonameID,
-		ISOLanguage:     record[2],
-		AlternateName:   record[3],
+		ISOLanguage:     isoLang,
+		AlternateName:   altName,
 		IsPreferredName: isPreferred,
 		IsShortName:     isShort,
 		IsColloquial:    isColloquial,
@@ -176,5 +234,5 @@ func (p *AlternateNameParser) parseAlternateName(record []string) (*domain.Alter
 		To:              to,
 	}
 
-	return altName, nil
+	return altNameObj, nil
 }

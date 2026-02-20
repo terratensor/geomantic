@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -89,46 +90,51 @@ func (d *Downloader) DownloadFile(ctx context.Context, filename string) (string,
 	return localPath, nil
 }
 
-func (d *Downloader) ExtractZip(zipPath string) (string, error) {
+// ExtractZip распаковывает zip архив и возвращает список распакованных файлов
+func (d *Downloader) ExtractZip(zipPath string) ([]string, error) {
 	// Открываем zip архив
 	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to open zip: %w", err)
+		return nil, fmt.Errorf("failed to open zip: %w", err)
 	}
 	defer reader.Close()
 
-	// Предполагаем что в архиве один файл
-	if len(reader.File) == 0 {
-		return "", fmt.Errorf("zip archive is empty")
+	var extractedFiles []string
+
+	for _, zipFile := range reader.File {
+		destPath := filepath.Join(d.cfg.DataDir, zipFile.Name)
+
+		// Проверяем существует ли уже распакованный файл
+		if _, err := os.Stat(destPath); err == nil {
+			extractedFiles = append(extractedFiles, destPath)
+			continue
+		}
+
+		// Открываем файл в архиве
+		rc, err := zipFile.Open()
+		if err != nil {
+			return nil, fmt.Errorf("failed to open file %s in zip: %w", zipFile.Name, err)
+		}
+
+		// Создаем выходной файл
+		out, err := os.Create(destPath)
+		if err != nil {
+			rc.Close()
+			return nil, fmt.Errorf("failed to create output file %s: %w", destPath, err)
+		}
+
+		// Копируем содержимое
+		_, err = io.Copy(out, rc)
+		rc.Close()
+		out.Close()
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract file %s: %w", zipFile.Name, err)
+		}
+
+		extractedFiles = append(extractedFiles, destPath)
+		log.Printf("Extracted: %s", destPath)
 	}
 
-	zipFile := reader.File[0]
-	destPath := filepath.Join(d.cfg.DataDir, zipFile.Name)
-
-	// Проверяем существует ли уже распакованный файл
-	if _, err := os.Stat(destPath); err == nil {
-		return destPath, nil
-	}
-
-	// Открываем файл в архиве
-	rc, err := zipFile.Open()
-	if err != nil {
-		return "", fmt.Errorf("failed to open file in zip: %w", err)
-	}
-	defer rc.Close()
-
-	// Создаём выходной файл
-	out, err := os.Create(destPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer out.Close()
-
-	// Копируем содержимое
-	_, err = io.Copy(out, rc)
-	if err != nil {
-		return "", fmt.Errorf("failed to extract file: %w", err)
-	}
-
-	return destPath, nil
+	return extractedFiles, nil
 }

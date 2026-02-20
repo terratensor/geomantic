@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/terratensor/geomantic/internal/adapters/downloader"
@@ -85,36 +86,46 @@ func (i *Importer) importFile(ctx context.Context, filename string) error {
 		return fmt.Errorf("failed to download: %w", err)
 	}
 
+	var filesToProcess []string
+
 	// Распаковываем если нужно
 	if filepath.Ext(filename) == ".zip" {
-		localPath, err = i.downloader.ExtractZip(localPath)
+		extractedFiles, err := i.downloader.ExtractZip(localPath)
 		if err != nil {
 			return fmt.Errorf("failed to extract: %w", err)
 		}
+		filesToProcess = append(filesToProcess, extractedFiles...)
+	} else {
+		filesToProcess = append(filesToProcess, localPath)
 	}
 
-	// Определяем тип файла и соответствующий парсер
-	var parser pipeline.Parser
+	// Обрабатываем каждый файл
+	for _, filePath := range filesToProcess {
+		// Определяем тип файла и соответствующий парсер
+		var parser pipeline.Parser
 
-	switch filename {
-	case "allCountries.zip":
-		parser = pipeline.NewGeonameParser(i.cfg)
-	case "alternateNamesV2.zip":
-		parser = pipeline.NewAlternateNameParser(i.cfg)
-	case "hierarchy.zip":
-		parser = pipeline.NewHierarchyParser(i.cfg)
-	default:
-		return fmt.Errorf("unknown file type: %s", filename)
+		switch {
+		case strings.Contains(filePath, "allCountries"):
+			parser = pipeline.NewGeonameParser(i.cfg)
+		case strings.Contains(filePath, "alternateNamesV2"):
+			parser = pipeline.NewAlternateNameParser(i.cfg)
+		case strings.Contains(filePath, "hierarchy"):
+			parser = pipeline.NewHierarchyParser(i.cfg)
+		default:
+			log.Printf("Skipping unknown file: %s", filePath)
+			continue
+		}
+
+		// Парсим и импортируем
+		start := time.Now()
+		count, err := parser.ProcessFile(ctx, filePath, i.manticore)
+		if err != nil {
+			return fmt.Errorf("failed to process %s: %w", filePath, err)
+		}
+
+		log.Printf("Imported %d records from %s in %v", count, filepath.Base(filePath), time.Since(start))
 	}
 
-	// Парсим и импортируем
-	start := time.Now()
-	count, err := parser.ProcessFile(ctx, localPath, i.manticore)
-	if err != nil {
-		return fmt.Errorf("failed to process: %w", err)
-	}
-
-	log.Printf("Imported %d records from %s in %v", count, filename, time.Since(start))
 	return nil
 }
 
