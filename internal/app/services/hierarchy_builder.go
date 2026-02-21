@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -493,6 +494,191 @@ func (b *HierarchyBuilder) CheckData(ctx context.Context) error {
 	json.NewDecoder(resp.Body).Decode(&result)
 
 	log.Printf("Geonames check response: %+v", result)
+
+	return nil
+}
+
+// buildMaterializedPaths строит материализованные пути для всех узлов
+func (b *HierarchyBuilder) buildMaterializedPaths(ctx context.Context) error {
+	log.Println("Building materialized paths...")
+
+	// Создаём таблицу для путей если не существует
+	if err := b.createPathsTable(ctx); err != nil {
+		return err
+	}
+
+	// Находим корневые элементы (ID, Name)
+	roots := b.findRootsWithNames()
+	log.Printf("Found %d root nodes", len(roots))
+
+	totalNodes := 0
+	batchSize := 100
+	pathBatch := make([]map[string]interface{}, 0, batchSize)
+	updateBatch := make([]map[string]interface{}, 0, batchSize)
+
+	// Для каждого корня строим дерево
+	for _, root := range roots {
+		paths := b.buildTreePaths(root.ID, root.Name, []int64{}, []string{}, 0)
+
+		for _, path := range paths {
+			// Подготовка для hierarchy_paths
+			pathDoc := map[string]interface{}{
+				"geoname_id": path.GeonameID,
+				"path":       strings.Join(path.Names, "/"),
+				"path_ids":   strings.Join(intsToStrings(path.IDs), "/"),
+				"depth":      path.Depth,
+				"root_id":    root.ID,
+			}
+			pathBatch = append(pathBatch, pathDoc)
+
+			// Подготовка для обновления geonames
+			updateDoc := map[string]interface{}{
+				"id":             path.GeonameID,
+				"hierarchy_path": strings.Join(path.Names, "/"),
+			}
+			updateBatch = append(updateBatch, updateDoc)
+
+			totalNodes++
+
+			// Сохраняем батчами
+			if len(pathBatch) >= batchSize {
+				if err := b.insertPathBatch(ctx, pathBatch, updateBatch); err != nil {
+					return err
+				}
+				pathBatch = pathBatch[:0]
+				updateBatch = updateBatch[:0]
+				log.Printf("Saved %d paths...", totalNodes)
+			}
+		}
+	}
+
+	// Финальный батч
+	if len(pathBatch) > 0 {
+		if err := b.insertPathBatch(ctx, pathBatch, updateBatch); err != nil {
+			return err
+		}
+	}
+
+	log.Printf("Materialized paths built for %d nodes", totalNodes)
+	return nil
+}
+
+func intsToStrings(i []int64) []string {
+	result := make([]string, len(i))
+	for idx, val := range i {
+		result[idx] = strconv.FormatInt(val, 10)
+	}
+	return result
+}
+
+// PathNode представляет узел с путём
+type PathNode struct {
+	GeonameID int64
+	IDs       []int64
+	Names     []string
+	Depth     int
+}
+
+// buildTreePaths рекурсивно строит пути для дерева
+func (b *HierarchyBuilder) buildTreePaths(nodeID int64, nodeName string, parentIDs []int64, parentNames []string, depth int) []PathNode {
+	var paths []PathNode
+
+	// Текущий путь
+	currentIDs := append(parentIDs, nodeID)
+	currentNames := append(parentNames, nodeName)
+
+	// Добавляем текущий узел
+	paths = append(paths, PathNode{
+		GeonameID: nodeID,
+		IDs:       currentIDs,
+		Names:     currentNames,
+		Depth:     depth,
+	})
+
+	// Рекурсивно обрабатываем детей
+	for _, childID := range b.relations[nodeID] {
+		if childName, ok := b.getName(childID); ok {
+			childPaths := b.buildTreePaths(childID, childName, currentIDs, currentNames, depth+1)
+			paths = append(paths, childPaths...)
+		}
+	}
+
+	return paths
+}
+
+// getName получает имя геонима из кэша
+func (b *HierarchyBuilder) getName(geonameID int64) (string, bool) {
+	if geoname, ok := b.geonameCache[geonameID]; ok {
+		if name, ok := geoname["name"].(string); ok {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// findRootsWithNames находит корневые элементы с именами
+func (b *HierarchyBuilder) findRootsWithNames() []struct {
+	ID   int64
+	Name string
+} {
+	var roots []struct {
+		ID   int64
+		Name string
+	}
+
+	// Находим узлы, у которых нет родителей, но есть дети
+	for nodeID := range b.relations {
+		if _, hasParent := b.parentMap[nodeID]; !hasParent {
+			if name, ok := b.getName(nodeID); ok {
+				roots = append(roots, struct {
+					ID   int64
+					Name string
+				}{nodeID, name})
+			}
+		}
+	}
+
+	return roots
+}
+
+// createPathsTable создает таблицу для материализованных путей
+func (b *HierarchyBuilder) createPathsTable(ctx context.Context) error {
+	sql := `CREATE TABLE IF NOT EXISTS hierarchy_paths (
+        id bigint,
+        geoname_id bigint,
+        path string,
+        path_ids string,
+        depth int,
+        root_id bigint
+    )`
+
+	req := b.client.GetClient().UtilsAPI.Sql(ctx).Body(sql)
+	req = req.RawResponse(true)
+
+	_, httpResp, err := b.client.GetClient().UtilsAPI.SqlExecute(req)
+	if err != nil {
+		return fmt.Errorf("failed to create paths table: %w", err)
+	}
+
+	if httpResp != nil && httpResp.StatusCode != 200 {
+		return fmt.Errorf("create paths table returned HTTP %d", httpResp.StatusCode)
+	}
+
+	log.Println("Created hierarchy_paths table")
+	return nil
+}
+
+// insertPathBatch вставляет батч путей и обновляет geonames
+func (b *HierarchyBuilder) insertPathBatch(ctx context.Context, pathBatch, updateBatch []map[string]interface{}) error {
+	// Вставляем в hierarchy_paths
+	if err := b.client.BulkInsert(ctx, "hierarchy_paths", pathBatch); err != nil {
+		return fmt.Errorf("failed to insert paths: %w", err)
+	}
+
+	// Обновляем geonames
+	if err := b.client.BulkUpdateGeonames(ctx, updateBatch); err != nil {
+		return fmt.Errorf("failed to update geonames: %w", err)
+	}
 
 	return nil
 }
