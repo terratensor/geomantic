@@ -1,3 +1,5 @@
+github.com/golang/geo v0.0.0-20260129164528-943061e2742c h1:ysO2h2Odnl1AJM1I2Lm/fa6JvO0pECMSt2CwBaa+ITo=
+github.com/golang/geo v0.0.0-20260129164528-943061e2742c/go.mod h1:Mymr9kRGDc64JPr03TSZmuIBODZ3KyswLzm1xL0HFA8=
 github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
 github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
 github.com/manticoresoftware/manticoresearch-go v1.10.0 h1:kQjCPSB85m6gx3q9YDf5pAXEdgdJWOpFDIuNkV0rwEI=

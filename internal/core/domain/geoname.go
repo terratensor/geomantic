@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/golang/geo/s2"
 )
 
 type FeatureClass string
@@ -40,6 +42,8 @@ type Geoname struct {
 	DEM              int
 	Timezone         string
 	ModificationDate time.Time
+	GeohashInt       uint64
+	GeohashString    string
 
 	// Иерархия (будет заполняться позже)
 	ParentID      *int64
@@ -67,4 +71,22 @@ func (g *Geoname) FullText() string {
 // String returns a string representation of the geoname
 func (g *Geoname) String() string {
 	return fmt.Sprintf("%d: %s (%s, %s)", g.ID, g.Name, g.CountryCode, g.FeatureCode)
+}
+
+// CalculateGeohash вычисляет геохеши на основе координат с заданным уровнем
+func (g *Geoname) CalculateGeohash(level int) {
+	if g.Latitude == 0 && g.Longitude == 0 {
+		g.GeohashInt = 0
+		g.GeohashString = ""
+		return
+	}
+
+	latlng := s2.LatLngFromDegrees(g.Latitude, g.Longitude)
+	cellID := s2.CellIDFromLatLng(latlng)
+
+	// Получаем родительскую ячейку нужного уровня
+	parentCell := cellID.Parent(level)
+
+	g.GeohashInt = uint64(parentCell)
+	g.GeohashString = parentCell.ToToken()
 }

@@ -28,6 +28,9 @@ type Config struct {
 	DataDir       string
 	FullImport    bool
 	UpdateEnabled bool
+
+	// S2 Geometry
+	S2GeohashLevel int // уровень точности геохеша (по умолчанию 9)
 }
 
 func Load() (*Config, error) {
@@ -50,6 +53,8 @@ func Load() (*Config, error) {
 		DataDir:       getEnv("DATA_DIR", "./data"),
 		FullImport:    getEnvAsBool("FULL_IMPORT", true),
 		UpdateEnabled: getEnvAsBool("UPDATE_ENABLED", false),
+
+		S2GeohashLevel: getEnvAsInt("S2_GEOHASH_LEVEL", 9), // 9 уровень по умолчанию
 	}
 
 	return cfg, nil
