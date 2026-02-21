@@ -91,6 +91,17 @@ var CreateTablesSQL = []string{
         depth int,
         root_id bigint
     )`,
+
+	// Таблица для admin кодов
+	`CREATE TABLE IF NOT EXISTS admin_codes (
+        id bigint,
+        code string indexed,
+        name text,
+        ascii_name string,
+        geoname_id bigint,
+        level int,
+        parent_code string
+    )`,
 }
 
 type ManticoreClient struct {
@@ -623,5 +634,54 @@ func (c *ManticoreClient) bulkRequest(ctx context.Context, data []byte) error {
 		return fmt.Errorf("bulk request returned HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
+	return nil
+}
+
+// BulkInsertAdminCodes вставляет admin коды пачкой
+func (c *ManticoreClient) BulkInsertAdminCodes(ctx context.Context, docs []map[string]interface{}) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	// Создаем таблицу если не существует
+	exists, err := c.TableExists(ctx, "admin_codes")
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		if err := c.createAdminCodesTable(ctx); err != nil {
+			return err
+		}
+	}
+
+	return c.bulkInsert(ctx, "admin_codes", docs)
+}
+
+// createAdminCodesTable создает таблицу для admin кодов
+func (c *ManticoreClient) createAdminCodesTable(ctx context.Context) error {
+	sql := `CREATE TABLE IF NOT EXISTS admin_codes (
+        id bigint,
+        code string indexed,
+        name text,
+        ascii_name string,
+        geoname_id bigint,
+        level int,
+        parent_code string
+    )`
+
+	req := c.client.UtilsAPI.Sql(ctx).Body(sql)
+	req = req.RawResponse(true)
+
+	_, httpResp, err := c.client.UtilsAPI.SqlExecute(req)
+	if err != nil {
+		return fmt.Errorf("failed to create admin_codes table: %w", err)
+	}
+
+	if httpResp != nil && httpResp.StatusCode != 200 {
+		return fmt.Errorf("create admin_codes table returned HTTP %d", httpResp.StatusCode)
+	}
+
+	log.Println("Created admin_codes table")
 	return nil
 }
