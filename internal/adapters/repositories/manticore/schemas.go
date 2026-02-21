@@ -270,10 +270,8 @@ func (c *ManticoreClient) BulkInsertHierarchyRelations(ctx context.Context, docs
 		return nil
 	}
 
-	// Создаем таблицу для иерархии если не существует
-	hierarchyTable := "hierarchy"
-
-	exists, err := c.TableExists(ctx, hierarchyTable)
+	// Проверяем существование таблицы
+	exists, err := c.TableExists(ctx, "hierarchy")
 	if err != nil {
 		return err
 	}
@@ -284,7 +282,7 @@ func (c *ManticoreClient) BulkInsertHierarchyRelations(ctx context.Context, docs
 		}
 	}
 
-	return c.bulkInsert(ctx, hierarchyTable, docs)
+	return c.bulkInsert(ctx, "hierarchy", docs)
 }
 
 // createHierarchyTable создает таблицу для иерархии
@@ -310,6 +308,7 @@ func (c *ManticoreClient) createHierarchyTable(ctx context.Context) error {
 		return fmt.Errorf("create hierarchy table returned HTTP %d", httpResp.StatusCode)
 	}
 
+	// Логируем только один раз при создании
 	log.Println("Created hierarchy table")
 	return nil
 }
@@ -473,37 +472,19 @@ func (c *ManticoreClient) DeleteGeoname(ctx context.Context, id int64) error {
 	return nil
 }
 
-// TableExists проверяет существование таблицы
+// TableExists проверяет существование таблицы через SHOW CREATE TABLE
 func (c *ManticoreClient) TableExists(ctx context.Context, tableName string) (bool, error) {
-	req := c.client.UtilsAPI.Sql(ctx).Body(fmt.Sprintf("SHOW TABLES LIKE '%s'", tableName))
-	// Устанавливаем rawResponse=true для получения структурированного ответа
+	showCreateTableQuery := fmt.Sprintf("SHOW CREATE TABLE %s", tableName)
+	req := c.client.UtilsAPI.Sql(ctx).Body(showCreateTableQuery)
 	req = req.RawResponse(true)
 
-	resp, httpResp, err := c.client.UtilsAPI.SqlExecute(req)
-	if err != nil {
-		// Если таблица не существует, Manticore может вернуть ошибку
-		if strings.Contains(err.Error(), "no such table") ||
-			strings.Contains(err.Error(), "unknown table") {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to check table existence: %w", err)
+	_, _, err := c.client.UtilsAPI.SqlExecute(req)
+
+	if err == nil {
+		return true, nil
 	}
 
-	// Проверяем HTTP статус
-	if httpResp != nil && httpResp.StatusCode != 200 {
-		return false, fmt.Errorf("table exists check returned HTTP %d", httpResp.StatusCode)
-	}
-
-	// Получаем Hits из ответа
-	hits := resp.SqlObjResponse.GetHits()
-
-	// Проверяем наличие данных в Hits
-	if data, ok := hits["data"]; ok {
-		if rows, ok := data.([]interface{}); ok && len(rows) > 0 {
-			return true, nil
-		}
-	}
-
+	// Если ошибка - таблицы нет
 	return false, nil
 }
 
@@ -611,30 +592,40 @@ func (c *ManticoreClient) BulkUpdateGeonames(ctx context.Context, updates []map[
 	return c.bulkRequest(ctx, buf.Bytes())
 }
 
-// bulkRequest выполняет HTTP запрос к Manticore
+// bulkRequest выполняет HTTP запрос к Manticore с ретраем
 func (c *ManticoreClient) bulkRequest(ctx context.Context, data []byte) error {
 	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9309)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/x-ndjson")
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < 2 {
+				time.Sleep(time.Second * time.Duration(attempt+1))
+				continue
+			}
+			return fmt.Errorf("failed to send request after %d attempts: %w", attempt+1, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("bulk request returned HTTP %d: %s", resp.StatusCode, string(body))
+		}
+
+		return nil
 	}
 
-	req.Header.Set("Content-Type", "application/x-ndjson")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("bulk request returned HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	return lastErr
 }
 
 // BulkInsertAdminCodes вставляет admin коды пачкой

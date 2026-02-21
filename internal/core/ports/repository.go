@@ -29,6 +29,8 @@ type GeonameRepository interface {
 
 	// BulkUpdateGeonames обновляет геонимы пачкой
 	BulkUpdateGeonames(ctx context.Context, updates []map[string]interface{}) error
+	// BulkInsertAdminCodes вставляет admin коды пачкой
+	BulkInsertAdminCodes(ctx context.Context, docs []map[string]interface{}) error
 }
 
 // AlternateNameRepository определяет порт для работы с альтернативными именами

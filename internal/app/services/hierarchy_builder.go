@@ -74,42 +74,30 @@ func (b *HierarchyBuilder) BuildHierarchy(ctx context.Context) error {
 	return nil
 }
 
-// loadGeonames загружает геонимы из Manticore
+// loadGeonames загружает геонимы из Manticore с пагинацией по ID
 func (b *HierarchyBuilder) loadGeonames(ctx context.Context) error {
-	log.Println("Loading geonames from Manticore...")
+	log.Println("Loading geonames from Manticore with ID-based pagination...")
 
-	offset := 0
 	limit := 1000
+	lastID := int64(0)
 	totalLoaded := 0
 
 	for {
-		// Создаём поисковый запрос
-		searchReq := map[string]interface{}{
-			"table": "geonames",
-			"query": map[string]interface{}{
-				"match_all": map[string]interface{}{},
-			},
-			"_source": []string{
-				"id", "name", "country_code", "feature_code",
-				"admin1_code", "admin2_code", "admin3_code", "admin4_code",
-			},
-			"limit":  limit,
-			"offset": offset,
-		}
+		// Используем SQL запрос с WHERE id > last_id
+		query := fmt.Sprintf(
+			"SELECT id, name, country_code, feature_code, admin1_code, admin2_code, admin3_code, admin4_code "+
+				"FROM geonames WHERE id > %d ORDER BY id ASC LIMIT %d",
+			lastID, limit)
 
-		body, err := json.Marshal(searchReq)
-		if err != nil {
-			return fmt.Errorf("failed to marshal search request: %w", err)
-		}
+		// log.Printf("Executing SQL: %s", query)
 
-		// Выполняем запрос к Manticore
 		resp, err := b.httpClient.Post(
-			fmt.Sprintf("http://%s:%d/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
-			"application/json",
-			bytes.NewReader(body),
+			fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+			"text/plain",
+			strings.NewReader(query),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to search geonames: %w", err)
+			return fmt.Errorf("failed to execute SQL: %w", err)
 		}
 
 		var result map[string]interface{}
@@ -119,43 +107,68 @@ func (b *HierarchyBuilder) loadGeonames(ctx context.Context) error {
 		}
 		resp.Body.Close()
 
-		// Извлекаем хиты
+		// log.Printf("Result 111111111 %v", result)
+		// panic("there")
+
+		// Извлекаем данные из ответа
 		hits, ok := result["hits"].(map[string]interface{})
 		if !ok {
+			log.Println("No hits in response")
 			break
 		}
 
 		hitsList, ok := hits["hits"].([]interface{})
 		if !ok || len(hitsList) == 0 {
+			log.Println("No more records")
 			break
 		}
 
+		batchLoaded := 0
 		for _, hit := range hitsList {
 			hitMap, ok := hit.(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			source, ok := hitMap["_source"].(map[string]interface{})
+			// log.Printf("hitMap: %+v", hitMap)
+
+			// ID находится на верхнем уровне, а не в _source
+			idFloat, ok := hitMap["_id"].(float64)
 			if !ok {
-				continue
+				log.Printf("Cannot get _id from hitMap, trying _source...")
+				// Попробуем найти id в _source как запасной вариант
+				source, ok := hitMap["_source"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				idFloat, ok = source["id"].(float64)
+				if !ok {
+					log.Printf("No id in _source either")
+					continue
+				}
 			}
 
-			// Извлекаем ID
-			idFloat, ok := source["id"].(float64)
-			if !ok {
-				continue
-			}
+			// log.Printf("Found ID: %v", idFloat)
 			id := int64(idFloat)
 
+			// Извлекаем source для данных
+			source, ok := hitMap["_source"].(map[string]interface{})
+			if !ok {
+				log.Printf("No _source in hitMap")
+				continue
+			}
+
 			b.geonameCache[id] = source
+			lastID = id
+			batchLoaded++
 			totalLoaded++
 		}
+		log.Printf("Loaded %d geonames (last ID: %d, total: %d)",
+			batchLoaded, lastID, totalLoaded)
 
-		offset += limit
-		log.Printf("Loaded %d geonames...", totalLoaded)
-
-		if len(hitsList) < limit {
+		// Если получили меньше записей чем запрашивали, значит это последний батч
+		if batchLoaded < limit {
+			log.Printf("Reached end of table")
 			break
 		}
 	}
@@ -197,52 +210,81 @@ func (b *HierarchyBuilder) loadAdminCodes(ctx context.Context) error {
 func (b *HierarchyBuilder) loadHierarchyRelations(ctx context.Context) error {
 	log.Println("Loading hierarchy relations from Manticore...")
 
-	// SQL запрос через HTTP API
-	sqlQuery := "SELECT parent_id, child_id, relation_type FROM hierarchy"
+	offset := 0
+	limit := 1000
 
-	resp, err := b.httpClient.Post(
-		fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
-		"text/plain",
-		strings.NewReader(sqlQuery),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to execute SQL: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	// Извлекаем данные
-	hits, ok := result["hits"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	data, ok := hits["hits"].([]interface{})
-	if !ok {
-		return nil
-	}
-
-	for _, item := range data {
-		itemMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
+	for {
+		// Используем тот же формат для поиска
+		searchReq := map[string]interface{}{
+			"index": "hierarchy",
+			"query": map[string]interface{}{
+				"match_all": map[string]interface{}{},
+			},
+			"_source": []interface{}{
+				"parent_id", "child_id", "relation_type",
+			},
+			"size": limit,
+			"from": offset,
 		}
 
-		source, ok := itemMap["_source"].(map[string]interface{})
-		if !ok {
-			continue
+		body, err := json.Marshal(searchReq)
+		if err != nil {
+			return fmt.Errorf("failed to marshal search request: %w", err)
 		}
 
-		parentID := int64(source["parent_id"].(float64))
-		childID := int64(source["child_id"].(float64))
-		// relType, _ := source["relation_type"].(string)
+		resp, err := b.httpClient.Post(
+			fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+			"application/json",
+			bytes.NewReader(body),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to search hierarchy: %w", err)
+		}
 
-		b.relations[parentID] = append(b.relations[parentID], childID)
-		b.parentMap[childID] = parentID
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+		resp.Body.Close()
+
+		hits, ok := result["hits"].(map[string]interface{})
+		if !ok {
+			break
+		}
+
+		hitsList, ok := hits["hits"].([]interface{})
+		if !ok || len(hitsList) == 0 {
+			break
+		}
+
+		for _, hit := range hitsList {
+			hitMap, ok := hit.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			source, ok := hitMap["_source"].(map[string]interface{})
+			if !ok {
+				source, ok = hitMap["doc"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+			}
+
+			parentID := int64(source["parent_id"].(float64))
+			childID := int64(source["child_id"].(float64))
+			//relType, _ := source["relation_type"].(string)
+
+			b.relations[parentID] = append(b.relations[parentID], childID)
+			b.parentMap[childID] = parentID
+		}
+
+		offset += limit
+
+		if len(hitsList) < limit {
+			break
+		}
 	}
 
 	log.Printf("Loaded %d hierarchy relations", len(b.parentMap))
@@ -402,6 +444,43 @@ func (b *HierarchyBuilder) bulkUpdateParentIDs(ctx context.Context, updates []ma
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("bulk update returned HTTP %d", resp.StatusCode)
 	}
+
+	return nil
+}
+
+// CheckData проверяет наличие данных в таблицах
+func (b *HierarchyBuilder) CheckData(ctx context.Context) error {
+	// Проверяем geonames
+	countReq := map[string]interface{}{
+		"index": "geonames",
+		"query": map[string]interface{}{
+			"match_all": map[string]interface{}{},
+		},
+		"size": 0,
+		"aggs": map[string]interface{}{
+			"total": map[string]interface{}{
+				"value_count": map[string]interface{}{
+					"field": "id",
+				},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(countReq)
+	resp, err := b.httpClient.Post(
+		fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	log.Printf("Geonames check response: %+v", result)
 
 	return nil
 }

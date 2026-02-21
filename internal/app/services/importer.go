@@ -40,8 +40,8 @@ func (i *Importer) Run(ctx context.Context) error {
 
 	// Список файлов для импорта
 	files := []string{
-		"allCountries.zip",
-		"alternateNamesV2.zip",
+		// "allCountries.zip",
+		// "alternateNamesV2.zip",
 		"hierarchy.zip",
 		"admin1CodesASCII.txt",
 		"admin2Codes.txt",
@@ -114,11 +114,16 @@ func (i *Importer) importFile(ctx context.Context, filename string) error {
 			parser = pipeline.NewAlternateNameParser(i.cfg)
 		case strings.Contains(filePath, "hierarchy"):
 			parser = pipeline.NewHierarchyParser(i.cfg)
+		case strings.Contains(filePath, "admin1CodesASCII"):
+			parser = pipeline.NewAdminCode1Parser(i.cfg) // ← ВЫЗОВ ЗДЕСЬ
+		case strings.Contains(filePath, "admin2Codes"):
+			parser = pipeline.NewAdminCode2Parser(i.cfg) // ← ВЫЗОВ ЗДЕСЬ
+		case strings.Contains(filePath, "adminCode5"):
+			parser = pipeline.NewAdminCode5Parser(i.cfg) // ← ВЫЗОВ ЗДЕСЬ
 		default:
 			log.Printf("Skipping unknown file: %s", filePath)
 			continue
 		}
-
 		// Парсим и импортируем
 		start := time.Now()
 		count, err := parser.ProcessFile(ctx, filePath, i.manticore)
