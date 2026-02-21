@@ -39,6 +39,16 @@ status:
 hierarchy:
 	go run cmd/build_hierarchy/main.go
 
+# Построение только путей (без перестроения иерархии)
+paths:
+	go run cmd/build_paths/main.go
+
+# Полный цикл: импорт + иерархия + пути
+full:
+	make import
+	make hierarchy
+	make paths	
+
 # Проверка статуса иерархии
 hierarchy-status:
 	@echo "Top level objects (continents and countries):"

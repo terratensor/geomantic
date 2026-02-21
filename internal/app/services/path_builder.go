@@ -7,12 +7,21 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/terratensor/geomantic/internal/adapters/repositories/manticore"
 	"github.com/terratensor/geomantic/internal/config"
 )
+
+// PathNode представляет узел с путём
+type PathNode struct {
+	GeonameID int64
+	IDs       []int64
+	Names     []string
+	Depth     int
+}
 
 type PathBuilder struct {
 	cfg    *config.Config
@@ -33,6 +42,8 @@ func NewPathBuilder(cfg *config.Config, client *manticore.ManticoreClient) *Path
 		geonameCache: make(map[int64]map[string]interface{}),
 	}
 }
+
+const maxDepth = 20 // Разумный максимум для административной иерархии
 
 // BuildPaths строит только материализованные пути на существующей иерархии
 func (b *PathBuilder) BuildPaths(ctx context.Context) error {
@@ -63,55 +74,39 @@ func (b *PathBuilder) BuildPaths(ctx context.Context) error {
 	return nil
 }
 
-// loadRelations загружает связи из таблицы hierarchy
+// loadRelations загружает связи из таблицы hierarchy с повторными попытками
 func (b *PathBuilder) loadRelations(ctx context.Context) error {
 	log.Println("Loading hierarchy relations...")
 
-	// Используем тот же HTTP подход что и для geonames
 	lastID := int64(0)
 	limit := 1000
 	total := 0
+	maxRetries := 3
 
 	for {
-		searchReq := map[string]interface{}{
-			"index": "hierarchy",
-			"query": map[string]interface{}{
-				"range": map[string]interface{}{
-					"id": map[string]interface{}{
-						"gt": lastID,
-					},
-				},
-			},
-			"_source": []string{"parent_id", "child_id"},
-			"sort": []map[string]string{
-				{"id": "asc"},
-			},
-			"size": limit,
+		var hitsList []interface{}
+		var err error
+
+		// Попытка выполнить запрос с ретраями
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				waitTime := time.Second * time.Duration(attempt+1)
+				log.Printf("Retry %d for hierarchy relations after %v", attempt+1, waitTime)
+				time.Sleep(waitTime)
+			}
+
+			hitsList, err = b.fetchHierarchyBatch(ctx, lastID, limit)
+			if err == nil {
+				break
+			}
+			log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
 		}
 
-		body, _ := json.Marshal(searchReq)
-
-		resp, err := http.Post(
-			fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
-			"application/json",
-			bytes.NewReader(body),
-		)
 		if err != nil {
-			return fmt.Errorf("failed to search hierarchy: %w", err)
+			return fmt.Errorf("failed after %d attempts at ID %d: %w", maxRetries, lastID, err)
 		}
 
-		var result map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		hits, ok := result["hits"].(map[string]interface{})
-		if !ok {
-			log.Println("No hits in response")
-			break
-		}
-
-		hitsList, ok := hits["hits"].([]interface{})
-		if !ok || len(hitsList) == 0 {
+		if len(hitsList) == 0 {
 			log.Println("No more hierarchy relations")
 			break
 		}
@@ -137,70 +132,111 @@ func (b *PathBuilder) loadRelations(ctx context.Context) error {
 		if len(hitsList) < limit {
 			break
 		}
+
+		// Небольшая задержка между батчами
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	log.Printf("Loaded %d hierarchy relations total", total)
 	return nil
 }
 
-// loadGeonamesNames загружает ID и имена геонимов
+// fetchHierarchyBatch загружает один батч иерархии
+func (b *PathBuilder) fetchHierarchyBatch(ctx context.Context, lastID int64, limit int) ([]interface{}, error) {
+	searchReq := map[string]interface{}{
+		"index": "hierarchy",
+		"query": map[string]interface{}{
+			"range": map[string]interface{}{
+				"id": map[string]interface{}{
+					"gt": lastID,
+				},
+			},
+		},
+		"_source": []string{"parent_id", "child_id"},
+		"sort": []map[string]string{
+			{"id": "asc"},
+		},
+		"size": limit,
+	}
+
+	body, _ := json.Marshal(searchReq)
+
+	// Создаем новый клиент для каждого запроса с таймаутом
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	resp, err := client.Post(
+		fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+
+	hits, ok := result["hits"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	hitsList, ok := hits["hits"].([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	return hitsList, nil
+}
+
+// loadGeonamesNames загружает имена геонимов с повторными попытками
 func (b *PathBuilder) loadGeonamesNames(ctx context.Context) error {
-	log.Println("Loading geonames names via HTTP...")
+	log.Println("Loading geonames names...")
 
 	lastID := int64(0)
 	limit := 1000
 	total := 0
+	maxRetries := 3
 
 	for {
-		// Формируем search запрос
-		searchReq := map[string]interface{}{
-			"index": "geonames",
-			"query": map[string]interface{}{
-				"range": map[string]interface{}{
-					"id": map[string]interface{}{
-						"gt": lastID,
-					},
-				},
-			},
-			"_source": []string{"id", "name"},
-			"sort": []map[string]string{
-				{"id": "asc"},
-			},
-			"size": limit,
+		var hitsList []interface{}
+		var err error
+
+		// Попытка выполнить запрос с ретраями
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				waitTime := time.Second * time.Duration(attempt+1)
+				log.Printf("Retry %d for geonames after %v", attempt+1, waitTime)
+				time.Sleep(waitTime)
+			}
+
+			hitsList, err = b.fetchGeonamesBatch(ctx, lastID, limit)
+			if err == nil {
+				break
+			}
+			log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
 		}
 
-		body, _ := json.Marshal(searchReq)
-
-		resp, err := http.Post(
-			fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
-			"application/json",
-			bytes.NewReader(body),
-		)
 		if err != nil {
-			return fmt.Errorf("failed to search: %w", err)
+			return fmt.Errorf("failed after %d attempts at ID %d: %w", maxRetries, lastID, err)
 		}
 
-		var result map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		hits, ok := result["hits"].(map[string]interface{})
-		if !ok {
-			break
-		}
-
-		hitsList, ok := hits["hits"].([]interface{})
-		if !ok || len(hitsList) == 0 {
+		if len(hitsList) == 0 {
+			log.Println("No more geonames")
 			break
 		}
 
 		for _, hit := range hitsList {
 			hitMap := hit.(map[string]interface{})
 
-			// ID на верхнем уровне
 			id := int64(hitMap["_id"].(float64))
-
-			// Данные в _source
 			source := hitMap["_source"].(map[string]interface{})
 			name := source["name"].(string)
 
@@ -212,15 +248,74 @@ func (b *PathBuilder) loadGeonamesNames(ctx context.Context) error {
 			total++
 		}
 
-		log.Printf("Loaded %d geonames...", total)
+		if total%100000 == 0 {
+			log.Printf("Loaded %d geonames...", total)
+		}
 
 		if len(hitsList) < limit {
 			break
 		}
+
+		// Небольшая задержка между батчами
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	log.Printf("Loaded %d geonames total", total)
 	return nil
+}
+
+// fetchGeonamesBatch загружает один батч геонимов
+func (b *PathBuilder) fetchGeonamesBatch(ctx context.Context, lastID int64, limit int) ([]interface{}, error) {
+	searchReq := map[string]interface{}{
+		"index": "geonames",
+		"query": map[string]interface{}{
+			"range": map[string]interface{}{
+				"id": map[string]interface{}{
+					"gt": lastID,
+				},
+			},
+		},
+		"_source": []string{"name"},
+		"sort": []map[string]string{
+			{"id": "asc"},
+		},
+		"size": limit,
+	}
+
+	body, _ := json.Marshal(searchReq)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	resp, err := client.Post(
+		fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode error: %w", err)
+	}
+
+	hits, ok := result["hits"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	hitsList, ok := hits["hits"].([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	return hitsList, nil
 }
 
 // ensurePathsTable создаёт таблицу hierarchy_paths если не существует
@@ -228,8 +323,8 @@ func (b *PathBuilder) ensurePathsTable(ctx context.Context) error {
 	sql := `CREATE TABLE IF NOT EXISTS hierarchy_paths (
         id bigint,
         geoname_id bigint,
-        path string,
-        path_ids string,
+        path string indexed,
+        path_ids string indexed,
         depth int,
         root_id bigint
     )`
@@ -303,6 +398,26 @@ func (b *PathBuilder) buildMaterializedPaths(ctx context.Context) error {
 
 			// Добавляем детей в очередь
 			for _, childID := range b.relations[item.nodeID] {
+
+				// При добавлении в очередь:
+				if item.depth >= maxDepth {
+					log.Printf("WARNING: Max depth %d reached for node %d", maxDepth, childID)
+					continue
+				}
+
+				// Проверяем, не было ли уже этого ID в пути (защита от циклов)
+				cycleDetected := false
+				for _, id := range item.pathIDs {
+					if id == childID {
+						cycleDetected = true
+						log.Printf("WARNING: Cycle detected for node %d, skipping", childID)
+						break
+					}
+				}
+				if cycleDetected {
+					continue
+				}
+
 				childName := b.getName(childID)
 				if childName == "" {
 					childName = fmt.Sprintf("Node_%d", childID)
@@ -425,11 +540,10 @@ func (b *PathBuilder) saveBatch(ctx context.Context, pathBatch, updateBatch []ma
 	return nil
 }
 
-// intsToStrings вспомогательная функция
-// func intsToStrings(ids []int64) []string {
-// 	result := make([]string, len(ids))
-// 	for i, id := range ids {
-// 		result[i] = fmt.Sprintf("%d", id)
-// 	}
-// 	return result
-// }
+func intsToStrings(i []int64) []string {
+	result := make([]string, len(i))
+	for idx, val := range i {
+		result[idx] = strconv.FormatInt(val, 10)
+	}
+	return result
+}

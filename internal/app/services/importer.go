@@ -42,8 +42,8 @@ func (i *Importer) Run(ctx context.Context) error {
 
 	// Список файлов для импорта
 	files := []string{
-		// "allCountries.zip",
-		// "alternateNamesV2.zip",
+		"allCountries.zip",
+		"alternateNamesV2.zip",
 		"hierarchy.zip",
 		"admin1CodesASCII.txt",
 		"admin2Codes.txt",

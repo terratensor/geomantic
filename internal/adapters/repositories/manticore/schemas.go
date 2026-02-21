@@ -18,6 +18,8 @@ import (
 const (
 	TableGeonames       = "geonames"
 	TableAlternateNames = "alternate_names"
+	TableHierarchy      = "hierarchy"
+	TableAdminCodes     = "admin_codes" // Новая таблица
 )
 
 var CreateTablesSQL = []string{
@@ -126,6 +128,11 @@ func NewClient(host string, port int) (*ManticoreClient, error) {
 	return &ManticoreClient{
 		client: client,
 	}, nil
+}
+
+// GetClient возвращает внутренний клиент Manticore
+func (c *ManticoreClient) GetClient() *manticoresearch.APIClient {
+	return c.client
 }
 
 // InitSchema создает таблицы если они не существуют
@@ -311,6 +318,25 @@ func (c *ManticoreClient) createHierarchyTable(ctx context.Context) error {
 	// Логируем только один раз при создании
 	log.Println("Created hierarchy table")
 	return nil
+}
+
+// BulkInsert вставляет документы в указанную таблицу
+func (c *ManticoreClient) BulkInsert(ctx context.Context, table string, docs []map[string]interface{}) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	// Проверяем существование таблицы
+	exists, err := c.TableExists(ctx, table)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		return fmt.Errorf("table %s does not exist", table)
+	}
+
+	return c.bulkInsert(ctx, table, docs)
 }
 
 // bulkInsert общая функция для вставки документов

@@ -18,8 +18,6 @@ services:
     environment:
       - EXTRA=1
     volumes:
-      - manticore-data:/var/lib/manticore      
+      - ./manticore/data:/var/lib/manticore
+      - ./manticore/logs:/var/log/manticore     
       - ./manticore/conf/manticore.conf:/etc/manticoresearch/manticore.conf
-
-volumes:
-  manticore-data:
