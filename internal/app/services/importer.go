@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,4 +149,22 @@ func (i *Importer) buildHierarchy(ctx context.Context) error {
 
 	log.Println("Hierarchy built successfully")
 	return nil
+}
+
+// SaveProgress сохраняет последний обработанный ID
+func (b *HierarchyBuilder) SaveProgress() error {
+	data := fmt.Sprintf("%d", b.lastProcessedID)
+	return os.WriteFile(b.progressFile, []byte(data), 0644)
+}
+
+// LoadProgress загружает последний обработанный ID
+func (b *HierarchyBuilder) LoadProgress() (int64, error) {
+	data, err := os.ReadFile(b.progressFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return strconv.ParseInt(string(data), 10, 64)
 }

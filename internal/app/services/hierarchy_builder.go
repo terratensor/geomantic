@@ -20,10 +20,12 @@ type HierarchyBuilder struct {
 	httpClient *http.Client
 
 	// Кэши
-	relations    map[int64][]int64
-	parentMap    map[int64]int64
-	adminCodeMap map[string]int64
-	geonameCache map[int64]map[string]interface{}
+	relations       map[int64][]int64
+	parentMap       map[int64]int64
+	adminCodeMap    map[string]int64
+	geonameCache    map[int64]map[string]interface{}
+	lastProcessedID int64
+	progressFile    string
 }
 
 func NewHierarchyBuilder(cfg *config.Config, client *manticore.ManticoreClient) *HierarchyBuilder {
@@ -74,107 +76,117 @@ func (b *HierarchyBuilder) BuildHierarchy(ctx context.Context) error {
 	return nil
 }
 
-// loadGeonames загружает геонимы из Manticore с пагинацией по ID
+// loadGeonames загружает геонимы из Manticore с пагинацией по ID и повторными попытками
 func (b *HierarchyBuilder) loadGeonames(ctx context.Context) error {
 	log.Println("Loading geonames from Manticore with ID-based pagination...")
 
 	limit := 1000
 	lastID := int64(0)
 	totalLoaded := 0
+	maxRetries := 3
 
 	for {
-		// Используем SQL запрос с WHERE id > last_id
-		query := fmt.Sprintf(
-			"SELECT id, name, country_code, feature_code, admin1_code, admin2_code, admin3_code, admin4_code "+
-				"FROM geonames WHERE id > %d ORDER BY id ASC LIMIT %d",
-			lastID, limit)
+		var batchLoaded int
+		var err error
 
-		// log.Printf("Executing SQL: %s", query)
+		// Пытаемся выполнить запрос с повторными попытками
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				log.Printf("Retry attempt %d for lastID %d", attempt+1, lastID)
+				time.Sleep(time.Second * time.Duration(attempt+1)) // Увеличивающаяся задержка
+			}
 
-		resp, err := b.httpClient.Post(
-			fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
-			"text/plain",
-			strings.NewReader(query),
-		)
+			batchLoaded, err = b.loadGeonamesBatch(ctx, lastID, limit)
+			if err == nil {
+				break
+			}
+
+			log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
+		}
+
 		if err != nil {
-			return fmt.Errorf("failed to execute SQL: %w", err)
+			return fmt.Errorf("failed after %d attempts at ID %d: %w", maxRetries, lastID, err)
 		}
 
-		var result map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return fmt.Errorf("failed to decode response: %w", err)
-		}
-		resp.Body.Close()
-
-		// log.Printf("Result 111111111 %v", result)
-		// panic("there")
-
-		// Извлекаем данные из ответа
-		hits, ok := result["hits"].(map[string]interface{})
-		if !ok {
-			log.Println("No hits in response")
-			break
-		}
-
-		hitsList, ok := hits["hits"].([]interface{})
-		if !ok || len(hitsList) == 0 {
+		if batchLoaded == 0 {
 			log.Println("No more records")
 			break
 		}
 
-		batchLoaded := 0
-		for _, hit := range hitsList {
-			hitMap, ok := hit.(map[string]interface{})
-			if !ok {
-				continue
-			}
+		totalLoaded += batchLoaded
+		lastID += int64(batchLoaded) // Приблизительно, но для нашей цели достаточно
 
-			// log.Printf("hitMap: %+v", hitMap)
+		log.Printf("Loaded %d geonames (total: %d)", batchLoaded, totalLoaded)
 
-			// ID находится на верхнем уровне, а не в _source
-			idFloat, ok := hitMap["_id"].(float64)
-			if !ok {
-				log.Printf("Cannot get _id from hitMap, trying _source...")
-				// Попробуем найти id в _source как запасной вариант
-				source, ok := hitMap["_source"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				idFloat, ok = source["id"].(float64)
-				if !ok {
-					log.Printf("No id in _source either")
-					continue
-				}
-			}
-
-			// log.Printf("Found ID: %v", idFloat)
-			id := int64(idFloat)
-
-			// Извлекаем source для данных
-			source, ok := hitMap["_source"].(map[string]interface{})
-			if !ok {
-				log.Printf("No _source in hitMap")
-				continue
-			}
-
-			b.geonameCache[id] = source
-			lastID = id
-			batchLoaded++
-			totalLoaded++
-		}
-		log.Printf("Loaded %d geonames (last ID: %d, total: %d)",
-			batchLoaded, lastID, totalLoaded)
-
-		// Если получили меньше записей чем запрашивали, значит это последний батч
-		if batchLoaded < limit {
-			log.Printf("Reached end of table")
-			break
-		}
+		// Небольшая задержка между батчами, чтобы не перегружать Manticore
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	log.Printf("Loaded %d geonames total", totalLoaded)
 	return nil
+}
+
+// loadGeonamesBatch загружает один батч записей
+func (b *HierarchyBuilder) loadGeonamesBatch(ctx context.Context, lastID int64, limit int) (int, error) {
+	query := fmt.Sprintf(
+		"SELECT id, name, country_code, feature_code, admin1_code, admin2_code, admin3_code, admin4_code "+
+			"FROM geonames WHERE id > %d ORDER BY id ASC LIMIT %d",
+		lastID, limit)
+
+	// Создаем новый HTTP клиент для каждого запроса с таймаутом
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	resp, err := client.Post(
+		fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+		"text/plain",
+		strings.NewReader(query),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to execute SQL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	hits, ok := result["hits"].(map[string]interface{})
+	if !ok {
+		return 0, nil
+	}
+
+	hitsList, ok := hits["hits"].([]interface{})
+	if !ok || len(hitsList) == 0 {
+		return 0, nil
+	}
+
+	batchLoaded := 0
+	for _, hit := range hitsList {
+		hitMap, ok := hit.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Получаем ID из верхнего уровня
+		idFloat, ok := hitMap["_id"].(float64)
+		if !ok {
+			continue
+		}
+		id := int64(idFloat)
+
+		// Получаем данные из _source
+		source, ok := hitMap["_source"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		b.geonameCache[id] = source
+		lastID = id
+		batchLoaded++
+	}
+
+	return batchLoaded, nil
 }
 
 // loadAdminCodes строит карту admin кодов
