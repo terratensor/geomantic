@@ -10,6 +10,7 @@ require (
 require gopkg.in/validator.v2 v2.0.1 // indirect
 
 require (
+	github.com/golang/geo v0.0.0-20260129164528-943061e2742c
 	github.com/manticoresoftware/manticoresearch-go v1.10.0
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect

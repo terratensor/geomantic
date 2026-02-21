@@ -60,3 +60,23 @@ hierarchy-status:
 	@curl -s -X POST http://localhost:9309/sql \
 		-H "Content-Type: text/plain" \
 		-d "SELECT COUNT(*) FROM hierarchy" | jq .
+
+# Очистка только таблиц (файлы остаются)
+drop-tables:
+	go run cmd/drop_tables/main.go
+
+# Полная перезагрузка с нуля (таблицы + импорт)
+rebuild:
+	make drop-tables
+	make import
+	make hierarchy
+	make paths
+
+# Быстрая перезагрузка только geonames с новыми полями
+rebuild-geonames:
+	curl -X POST http://localhost:9309/sql -H "Content-Type: text/plain" -d "DROP TABLE IF EXISTS geonames"
+	curl -X POST http://localhost:9309/sql -H "Content-Type: text/plain" -d "DROP TABLE IF EXISTS hierarchy_paths"
+	make import
+	make hierarchy
+	make paths		
+

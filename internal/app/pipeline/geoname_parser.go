@@ -18,13 +18,15 @@ import (
 // GeonameParser handles parsing of allCountries.txt
 type GeonameParser struct {
 	*BaseParser
-	batchChan chan []*domain.Geoname
+	batchChan    chan []*domain.Geoname
+	geohashLevel int
 }
 
 func NewGeonameParser(cfg *config.Config) *GeonameParser {
 	return &GeonameParser{
-		BaseParser: NewBaseParser(cfg),
-		batchChan:  make(chan []*domain.Geoname, cfg.ChannelBufferSize),
+		BaseParser:   NewBaseParser(cfg),
+		batchChan:    make(chan []*domain.Geoname, cfg.ChannelBufferSize),
+		geohashLevel: cfg.S2GeohashLevel,
 	}
 }
 
@@ -215,6 +217,8 @@ func (p *GeonameParser) parseGeonameFromFields(fields []string, lineNum int64) (
 		Timezone:         fields[17],
 		ModificationDate: modDate,
 	}
+	// Calculate geohash
+	geoname.CalculateGeohash(p.geohashLevel)
 
 	return geoname, nil
 }

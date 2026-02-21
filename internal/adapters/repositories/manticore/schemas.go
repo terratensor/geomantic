@@ -27,7 +27,7 @@ var CreateTablesSQL = []string{
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
         id bigint,
         name text,
-        asciiname string indexed,
+        asciiname string attribute indexed,
         alternatenames text,
         latitude float,
         longitude float,
@@ -46,7 +46,9 @@ var CreateTablesSQL = []string{
         modification_date timestamp,
         parent_id bigint,
         hierarchy_path string,
-        full_text text
+        full_text text,
+		geohash_int bigint,
+        geohash_string string attribute indexed
     ) 
     morphology='lemmatize_ru_all, stem_enru'
     min_stemming_len='4'
@@ -59,7 +61,7 @@ var CreateTablesSQL = []string{
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
         id bigint,
         geonameid bigint,
-        isolanguage string indexed,
+        isolanguage string attribute indexed,
         alternatename text,
         ispreferredname bool,
         isshortname bool,
@@ -88,8 +90,8 @@ var CreateTablesSQL = []string{
 	`CREATE TABLE IF NOT EXISTS hierarchy_paths (
         id bigint,
         geoname_id bigint,
-        path string,
-        path_ids string,
+        path text,
+        path_ids text,
         depth int,
         root_id bigint
     )`,
@@ -189,6 +191,8 @@ func geonameToMap(g *domain.Geoname) map[string]interface{} {
 		"timezone":          g.Timezone,
 		"modification_date": g.ModificationDate.Unix(),
 		"full_text":         g.FullText(),
+		"geohash_int":       g.GeohashInt,
+		"geohash_string":    g.GeohashString,
 	}
 
 	if g.Elevation != nil {
@@ -388,7 +392,7 @@ func (c *ManticoreClient) bulkInsert(ctx context.Context, table string, docs []m
 	}
 
 	// Делаем прямой HTTP запрос
-	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9309)
+	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9308)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
 	if err != nil {
@@ -620,7 +624,7 @@ func (c *ManticoreClient) BulkUpdateGeonames(ctx context.Context, updates []map[
 
 // bulkRequest выполняет HTTP запрос к Manticore с ретраем
 func (c *ManticoreClient) bulkRequest(ctx context.Context, data []byte) error {
-	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9309)
+	url := fmt.Sprintf("http://%s:%d/bulk", "localhost", 9308)
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
