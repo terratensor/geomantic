@@ -15,6 +15,7 @@ import (
 )
 
 type NameEntry struct {
+	OriginalName    string // Оригинальное имя для вывода
 	GeohashesString map[string]bool
 	GeohashesInt    map[uint64]bool
 	FirstSeen       int64
@@ -44,7 +45,7 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 	start := time.Now()
 
 	lastID := int64(0)
-	limit := 5000
+	limit := 1000
 	totalProcessed := 0
 	totalInserted := 0
 	maxRetries := 3
@@ -200,20 +201,22 @@ func (b *NameDictBuilder) fetchBatch(ctx context.Context, lastID int64, limit in
 
 	query := fmt.Sprintf(`
         SELECT 
-            id,
-            name,
-            alternatenames,
-            geohash_string,
-            geohash_int,
-            alternate_names.alternatename
-        FROM geonames
-        LEFT JOIN alternate_names 
-		ON alternate_names.id = geonames.parent_id
+			id,
+			name,
+			asciiname,
+			alternatenames,
+			geohash_string,
+			geohash_int,
+			alternate_names.alternatename
+		FROM geonames
+		LEFT JOIN alternate_names 
+		ON geonames.id = alternate_names.geonameid
         WHERE id > %d
+		GROUP BY asciiname
         ORDER BY id ASC
         LIMIT %d`, lastID, limit)
 
-	// log.Printf("Executing query: %s", query)
+	log.Printf("Executing query: %s", query)
 
 	resp, err := b.httpClient.Post(
 		fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
@@ -273,38 +276,47 @@ func (b *NameDictBuilder) fetchBatch(ctx context.Context, lastID int64, limit in
 func (b *NameDictBuilder) processBatch(rows []map[string]interface{}) map[string]*NameEntry {
 	batchMap := make(map[string]*NameEntry)
 
-	for _, row := range rows {
-		// log.Printf("Processing row: %+v", row)
+	// Группируем строки по geoname ID
+	geoGroups := make(map[int64][]map[string]interface{})
 
-		// Получаем ID из поля id (которое мы добавили из _id)
+	for _, row := range rows {
 		idFloat, ok := row["id"].(float64)
 		if !ok {
-			log.Printf("Warning: no id in row, row: %+v", row)
 			continue
 		}
 		geonameID := int64(idFloat)
+		geoGroups[geonameID] = append(geoGroups[geonameID], row)
+	}
 
-		// Получаем строковый геохеш (может быть nil)
+	// Обрабатываем каждую группу (один геоним со всеми его альтернативными именами)
+	for geonameID, group := range geoGroups {
+		if len(group) == 0 {
+			continue
+		}
+
+		// Берем основную информацию из первой записи группы
+		firstRow := group[0]
+
+		// Получаем геохеши (ОДИНАКОВЫЕ для всех имён этого геонима)
 		var geohashStr string
-		if val, ok := row["geohash_string"]; ok && val != nil {
+		if val, ok := firstRow["geohash_string"]; ok && val != nil {
 			geohashStr, _ = val.(string)
 		}
 
-		// Получаем числовой геохеш (может быть nil)
 		var geohashInt uint64
-		if val, ok := row["geohash_int"]; ok && val != nil {
+		if val, ok := firstRow["geohash_int"]; ok && val != nil {
 			if ghFloat, ok := val.(float64); ok {
 				geohashInt = uint64(ghFloat)
 			}
 		}
 
 		// Добавляем основное имя
-		if name, ok := row["name"].(string); ok && name != "" {
+		if name, ok := firstRow["name"].(string); ok && name != "" {
 			b.addNameToMap(batchMap, name, geohashStr, geohashInt, geonameID)
 		}
 
-		// Парсим alternatenames (через запятую)
-		if altNames, ok := row["alternatenames"]; ok && altNames != nil {
+		// Добавляем имена из alternatenames (через запятую)
+		if altNames, ok := firstRow["alternatenames"]; ok && altNames != nil {
 			if altStr, ok := altNames.(string); ok && altStr != "" {
 				for _, altName := range strings.Split(altStr, ",") {
 					altName = strings.TrimSpace(altName)
@@ -315,10 +327,12 @@ func (b *NameDictBuilder) processBatch(rows []map[string]interface{}) map[string
 			}
 		}
 
-		// Добавляем из alternate_names
-		if altName, ok := row["alternate_names.alternatename"]; ok && altName != nil {
-			if altStr, ok := altName.(string); ok && altStr != "" {
-				b.addNameToMap(batchMap, altStr, geohashStr, geohashInt, geonameID)
+		// Добавляем имена из alternate_names (все строки группы)
+		for _, row := range group {
+			if altName, ok := row["alt_name"]; ok && altName != nil {
+				if altStr, ok := altName.(string); ok && altStr != "" {
+					b.addNameToMap(batchMap, altStr, geohashStr, geohashInt, geonameID)
+				}
 			}
 		}
 	}
@@ -326,7 +340,17 @@ func (b *NameDictBuilder) processBatch(rows []map[string]interface{}) map[string
 	return batchMap
 }
 
-// addNameToMap добавляет имя в map с проверкой исключений
+// normalizeName нормализует имя для использования в качестве ключа
+func normalizeName(name string) string {
+	// Удаляем лишние пробелы
+	name = strings.TrimSpace(name)
+	// Приводим к нижнему регистру для сравнения
+	name = strings.ToLower(name)
+	// Можно добавить другие нормализации при необходимости
+	return name
+}
+
+// addNameToMap добавляет имя в map с нормализацией
 func (b *NameDictBuilder) addNameToMap(
 	batchMap map[string]*NameEntry,
 	name, geohashStr string,
@@ -338,14 +362,18 @@ func (b *NameDictBuilder) addNameToMap(
 		return
 	}
 
-	entry, exists := batchMap[name]
+	// Нормализуем имя для ключа
+	normalizedKey := normalizeName(name)
+
+	entry, exists := batchMap[normalizedKey]
 	if !exists {
 		entry = &NameEntry{
+			OriginalName:    name, // Сохраняем оригинальное имя для вывода
 			GeohashesString: make(map[string]bool),
 			GeohashesInt:    make(map[uint64]bool),
 			FirstSeen:       geonameID,
 		}
-		batchMap[name] = entry
+		batchMap[normalizedKey] = entry
 	}
 
 	if geohashStr != "" {
@@ -367,13 +395,29 @@ func (b *NameDictBuilder) convertToDocuments(batchMap map[string]*NameEntry) []m
 		// Конвертируем map геохешей в slice для multi64
 		geohashesInt := make([]uint64, 0, len(entry.GeohashesInt))
 		for gh := range entry.GeohashesInt {
-			if gh > 0 { // Проверяем, что значение не нулевое
+			if gh > 0 {
 				geohashesInt = append(geohashesInt, gh)
 			}
 		}
 
+		// Проверка: если только один геохеш, это всё равно должен быть массив
+		if len(geohashesInt) == 0 {
+			log.Printf("Skipping name %s: no valid geohashes", name)
+			continue
+		}
+
 		// Сортируем для консистентности
 		sort.Slice(geohashesInt, func(i, j int) bool { return geohashesInt[i] < geohashesInt[j] })
+
+		// Убираем дубликаты на всякий случай
+		uniqueGeo := make([]uint64, 0, len(geohashesInt))
+		seen := make(map[uint64]bool)
+		for _, gh := range geohashesInt {
+			if !seen[gh] {
+				seen[gh] = true
+				uniqueGeo = append(uniqueGeo, gh)
+			}
+		}
 
 		// Конвертируем map в строку через запятую
 		geohashesStr := make([]string, 0, len(entry.GeohashesString))
@@ -384,18 +428,22 @@ func (b *NameDictBuilder) convertToDocuments(batchMap map[string]*NameEntry) []m
 		}
 		sort.Strings(geohashesStr)
 
-		// Если нет геохешей, пропускаем запись
-		if len(geohashesInt) == 0 {
-			log.Printf("Skipping name %s: no valid geohashes", name)
-			continue
+		// Убираем дубликаты строковых геохешей
+		uniqueStr := make([]string, 0, len(geohashesStr))
+		seenStr := make(map[string]bool)
+		for _, gh := range geohashesStr {
+			if !seenStr[gh] {
+				seenStr[gh] = true
+				uniqueStr = append(uniqueStr, gh)
+			}
 		}
 
 		doc := map[string]interface{}{
 			"id":               id,
-			"name":             name,
-			"geohashes_uint64": geohashesInt, // Должен быть []uint64
-			"geohashes_string": strings.Join(geohashesStr, ","),
-			"occurrences":      len(geohashesInt),
+			"name":             entry.OriginalName, // Используем оригинальное имя
+			"geohashes_uint64": uniqueGeo,
+			"geohashes_string": strings.Join(uniqueStr, ","),
+			"occurrences":      len(uniqueGeo),
 			"first_geoname_id": entry.FirstSeen,
 		}
 		docs = append(docs, doc)
