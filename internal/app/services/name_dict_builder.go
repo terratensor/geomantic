@@ -115,9 +115,16 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, error) {
 	var result []*GeoNameInfo
 	lastID := int64(0)
-	limit := 10000
+	limit := 5000
+	maxRetries := 5
 
 	for {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+
 		query := fmt.Sprintf(`
             SELECT id, name, alternatenames, geohash_string, geohash_int
             FROM geonames
@@ -125,15 +132,44 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
             ORDER BY id ASC
             LIMIT %d`, lastID, limit)
 
-		rows, err := b.fetchRows(ctx, query)
-		if err != nil {
-			return nil, err
+		var rows []map[string]interface{}
+		var err error
+
+		// Пытаемся выполнить запрос с повторными попытками
+		retrySuccess := false
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				waitTime := time.Second * time.Duration(attempt+1)
+				log.Printf("Retry %d for geonames batch after %v (lastID: %d)",
+					attempt+1, waitTime, lastID)
+				time.Sleep(waitTime)
+			}
+
+			rows, err = b.fetchRows(ctx, query)
+			if err == nil {
+				retrySuccess = true
+				break
+			}
+
+			if strings.Contains(err.Error(), "EOF") {
+				log.Printf("Connection lost (attempt %d): %v", attempt+1, err)
+				b.httpClient = &http.Client{Timeout: 60 * time.Second}
+			} else {
+				log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
+			}
+		}
+
+		if !retrySuccess {
+			return result, fmt.Errorf("failed after %d attempts at ID %d: %w",
+				maxRetries, lastID, err)
 		}
 
 		if len(rows) == 0 {
+			log.Println("No more geonames")
 			break
 		}
 
+		batchLoaded := 0
 		for _, row := range rows {
 			// Безопасное извлечение ID
 			idVal, ok := row["id"]
@@ -181,13 +217,18 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
 
 			result = append(result, geo)
 			lastID = geo.ID
+			batchLoaded++
 		}
 
-		log.Printf("Loaded %d geonames...", len(result))
+		log.Printf("Loaded %d geonames (total: %d, lastID: %d)...",
+			batchLoaded, len(result), lastID)
 
 		if len(rows) < limit {
 			break
 		}
+
+		// Небольшая задержка между батчами
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return result, nil
@@ -198,8 +239,15 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
 	result := make(map[int64][]*AltNameInfo)
 	lastID := int64(0)
 	limit := 1000
+	maxRetries := 50
 
 	for {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		default:
+		}
+
 		query := fmt.Sprintf(`
             SELECT id, geonameid, alternatename
             FROM alternate_names
@@ -207,60 +255,77 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
             ORDER BY id ASC
             LIMIT %d`, lastID, limit)
 
-		rows, err := b.fetchRows(ctx, query)
-		if err != nil {
-			return nil, err
+		var rows []map[string]interface{}
+		var err error
+
+		// Пытаемся выполнить запрос с повторными попытками
+		retrySuccess := false
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				waitTime := time.Second * time.Duration(attempt+1)
+				log.Printf("Retry %d for alternate_names batch after %v (lastID: %d)",
+					attempt+1, waitTime, lastID)
+				time.Sleep(waitTime)
+			}
+
+			rows, err = b.fetchRows(ctx, query)
+			if err == nil {
+				retrySuccess = true
+				break
+			}
+
+			// Проверяем, является ли ошибка EOF (обрыв соединения)
+			if strings.Contains(err.Error(), "EOF") {
+				log.Printf("Connection lost (attempt %d): %v", attempt+1, err)
+				// Создаём новый HTTP клиент для следующей попытки
+				b.httpClient = &http.Client{Timeout: 60 * time.Second}
+			} else {
+				log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
+			}
+		}
+
+		if !retrySuccess {
+			return result, fmt.Errorf("failed after %d attempts at ID %d: %w",
+				maxRetries, lastID, err)
 		}
 
 		if len(rows) == 0 {
+			log.Println("No more alternate names")
 			break
 		}
 
+		batchLoaded := 0
 		for _, row := range rows {
-			// Получаем ID (теперь должен быть в row["id"] из _id)
+			// Получаем ID
 			idVal, ok := row["id"]
 			if !ok || idVal == nil {
-				log.Printf("Warning: row has no id field, skipping")
 				continue
 			}
 
-			// Преобразуем ID в float64 (Manticore возвращает числа как float64)
 			idFloat, ok := idVal.(float64)
 			if !ok {
-				log.Printf("Warning: id is not float64: %T, skipping", idVal)
 				continue
 			}
 
 			// Получаем geonameid
 			geonameidVal, ok := row["geonameid"]
 			if !ok || geonameidVal == nil {
-				log.Printf("Warning: row %d has no geonameid, skipping", int64(idFloat))
 				continue
 			}
 
 			geonameidFloat, ok := geonameidVal.(float64)
 			if !ok {
-				log.Printf("Warning: geonameid is not float64 for id %d: %T, skipping",
-					int64(idFloat), geonameidVal)
 				continue
 			}
 
 			// Получаем alternatename
 			altNameVal, ok := row["alternatename"]
 			if !ok || altNameVal == nil {
-				log.Printf("Warning: row %d has no alternatename, skipping", int64(idFloat))
 				continue
 			}
 
 			altName, ok := altNameVal.(string)
-			if !ok {
-				log.Printf("Warning: alternatename is not string for id %d: %T, skipping",
-					int64(idFloat), altNameVal)
-				continue
-			}
-
-			// Пропускаем пустые имена
-			if altName == "" {
+			if !ok || altName == "" {
 				continue
 			}
 
@@ -271,14 +336,18 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
 
 			result[alt.GeonameID] = append(result[alt.GeonameID], alt)
 			lastID = int64(idFloat)
+			batchLoaded++
 		}
 
-		log.Printf("Loaded %d alternate names (total groups: %d)...",
-			len(rows), len(result))
+		log.Printf("Loaded %d alternate names (total groups: %d, lastID: %d)...",
+			batchLoaded, len(result), lastID)
 
 		if len(rows) < limit {
 			break
 		}
+
+		// Небольшая задержка между батчами
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return result, nil
@@ -366,6 +435,9 @@ func (b *NameDictBuilder) addGeoNameToMap(
 	geonameID int64,
 ) {
 	if !b.shouldInclude(name) {
+		if strings.ContainsAny(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
+			log.Printf("WARNING: Latin name '%s' rejected by shouldInclude", name)
+		}
 		return
 	}
 
