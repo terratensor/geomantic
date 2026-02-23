@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,10 +44,12 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 	start := time.Now()
 
 	lastID := int64(0)
-	limit := 100000
+	limit := 5000
 	totalProcessed := 0
 	totalInserted := 0
 	maxRetries := 3
+	errorCount := 0
+	maxErrors := 1000 // Максимальное количество ошибок перед остановкой
 
 	// Создаём таблицу если не существует
 	if err := b.ensureTable(ctx); err != nil {
@@ -54,6 +57,13 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 	}
 
 	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Context cancelled, stopping...")
+			return ctx.Err()
+		default:
+		}
+
 		var rows []map[string]interface{}
 		var err error
 
@@ -69,11 +79,18 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 			if err == nil {
 				break
 			}
-			log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
+			log.Printf("Batch fetch failed (attempt %d): %v", attempt+1, err)
 		}
 
 		if err != nil {
-			return fmt.Errorf("failed after %d attempts at ID %d: %w", maxRetries, lastID, err)
+			errorCount++
+			log.Printf("Error fetching batch at ID %d: %v", lastID, err)
+			if errorCount > maxErrors {
+				return fmt.Errorf("too many errors (%d), stopping", errorCount)
+			}
+			// Пропускаем этот батч и продолжаем со следующим ID
+			lastID += int64(limit)
+			continue
 		}
 
 		if len(rows) == 0 {
@@ -87,9 +104,53 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 		// Конвертируем в документы для вставки
 		docs := b.convertToDocuments(batchMap)
 
-		// Вставляем в Manticore
-		if err := b.client.BulkInsertNames(ctx, docs); err != nil {
-			return fmt.Errorf("failed to insert batch: %w", err)
+		if len(docs) == 0 {
+			log.Printf("No valid documents in batch at ID %d", lastID)
+			// Обновляем lastID из последней записи
+			if lastRow, ok := rows[len(rows)-1]["id"].(float64); ok {
+				lastID = int64(lastRow)
+			}
+			continue
+		}
+
+		// Вставляем в Manticore с повторными попытками
+		insertSuccess := false
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				waitTime := time.Second * time.Duration(attempt+1)
+				log.Printf("Retry insert %d after %v", attempt+1, waitTime)
+				time.Sleep(waitTime)
+			}
+
+			err = b.client.BulkInsertNames(ctx, docs)
+			if err == nil {
+				insertSuccess = true
+				break
+			}
+			log.Printf("Insert failed (attempt %d): %v", attempt+1, err)
+		}
+
+		if !insertSuccess {
+			errorCount++
+			log.Printf("Failed to insert batch at ID %d after %d attempts: %v",
+				lastID, maxRetries, err)
+
+			// Логируем проблемные документы для отладки
+			for i, doc := range docs {
+				if i < 5 { // Логируем только первые 5
+					log.Printf("Problem doc %d: %+v", i, doc)
+				}
+			}
+
+			if errorCount > maxErrors {
+				return fmt.Errorf("too many insert errors (%d), stopping", errorCount)
+			}
+
+			// Пропускаем этот батч
+			if lastRow, ok := rows[len(rows)-1]["id"].(float64); ok {
+				lastID = int64(lastRow)
+			}
+			continue
 		}
 
 		// Обновляем lastID из последней записи
@@ -99,16 +160,19 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 
 		totalProcessed += len(rows)
 		totalInserted += len(docs)
+		errorCount = 0 // Сбрасываем счётчик ошибок после успешной вставки
 
-		log.Printf("Processed up to ID %d: %d geonames, %d unique names",
-			lastID, totalProcessed, totalInserted)
+		if totalProcessed%50000 == 0 {
+			log.Printf("Progress: processed %d geonames, inserted %d unique names",
+				totalProcessed, totalInserted)
+		}
 
 		// Небольшая задержка между батчами
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	log.Printf("Name dictionary built in %v", time.Since(start))
-	log.Printf("Total: %d geonames processed, %d unique names inserted",
+	log.Printf("Final: %d geonames processed, %d unique names inserted",
 		totalProcessed, totalInserted)
 
 	return nil
@@ -303,19 +367,33 @@ func (b *NameDictBuilder) convertToDocuments(batchMap map[string]*NameEntry) []m
 		// Конвертируем map геохешей в slice для multi64
 		geohashesInt := make([]uint64, 0, len(entry.GeohashesInt))
 		for gh := range entry.GeohashesInt {
-			geohashesInt = append(geohashesInt, gh)
+			if gh > 0 { // Проверяем, что значение не нулевое
+				geohashesInt = append(geohashesInt, gh)
+			}
 		}
+
+		// Сортируем для консистентности
+		sort.Slice(geohashesInt, func(i, j int) bool { return geohashesInt[i] < geohashesInt[j] })
 
 		// Конвертируем map в строку через запятую
 		geohashesStr := make([]string, 0, len(entry.GeohashesString))
 		for gh := range entry.GeohashesString {
-			geohashesStr = append(geohashesStr, gh)
+			if gh != "" {
+				geohashesStr = append(geohashesStr, gh)
+			}
+		}
+		sort.Strings(geohashesStr)
+
+		// Если нет геохешей, пропускаем запись
+		if len(geohashesInt) == 0 {
+			log.Printf("Skipping name %s: no valid geohashes", name)
+			continue
 		}
 
 		doc := map[string]interface{}{
-			"id":               id, // Можно генерировать детерминированный ID из имени
+			"id":               id,
 			"name":             name,
-			"geohashes_uint64": geohashesInt,
+			"geohashes_uint64": geohashesInt, // Должен быть []uint64
 			"geohashes_string": strings.Join(geohashesStr, ","),
 			"occurrences":      len(geohashesInt),
 			"first_geoname_id": entry.FirstSeen,
