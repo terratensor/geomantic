@@ -19,7 +19,8 @@ const (
 	TableGeonames       = "geonames"
 	TableAlternateNames = "alternate_names"
 	TableHierarchy      = "hierarchy"
-	TableAdminCodes     = "admin_codes" // Новая таблица
+	TableAdminCodes     = "admin_codes"
+	TableNameDict       = "geoname_dict"
 )
 
 var CreateTablesSQL = []string{
@@ -106,6 +107,19 @@ var CreateTablesSQL = []string{
         level int,
         parent_code string
     )`,
+
+	// Таблица словаря имён
+	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+        id bigint,
+        name text,
+        geohashes_uint64 multi64,
+        geohashes_string text,
+        occurrences int,
+        first_geoname_id bigint
+    ) 
+    morphology='lemmatize_ru_all, stem_enru'
+    min_infix_len='2'
+    html_strip='1'`, TableNameDict),
 }
 
 type ManticoreClient struct {
@@ -704,5 +718,86 @@ func (c *ManticoreClient) createAdminCodesTable(ctx context.Context) error {
 	}
 
 	log.Println("Created admin_codes table")
+	return nil
+}
+
+// BulkInsertNames вставляет записи словаря имён пачкой
+func (c *ManticoreClient) BulkInsertNames(ctx context.Context, docs []map[string]interface{}) error {
+	if len(docs) == 0 {
+		return nil
+	}
+
+	// Проверяем существование таблицы
+	exists, err := c.TableExists(ctx, TableNameDict)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		if err := c.createNameDictTable(ctx); err != nil {
+			return err
+		}
+	}
+
+	return c.bulkInsert(ctx, TableNameDict, docs)
+}
+
+// createNameDictTable создает таблицу для словаря имён
+func (c *ManticoreClient) createNameDictTable(ctx context.Context) error {
+	sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+        id bigint,
+        name text,
+        geohashes_uint64 multi64,
+        geohashes_string text,
+        occurrences int,
+        first_geoname_id bigint
+    ) 
+    morphology='lemmatize_ru_all, stem_enru'
+    min_infix_len='2'
+    html_strip='1'`, TableNameDict)
+
+	req := c.client.UtilsAPI.Sql(ctx).Body(sql)
+	req = req.RawResponse(true)
+
+	_, httpResp, err := c.client.UtilsAPI.SqlExecute(req)
+	if err != nil {
+		return fmt.Errorf("failed to create %v table: %w", TableNameDict, err)
+	}
+
+	if httpResp != nil && httpResp.StatusCode != 200 {
+		return fmt.Errorf("create %v table returned HTTP %d", TableNameDict, httpResp.StatusCode)
+	}
+
+	log.Printf("Created %v table (createNameDictTable)", TableNameDict)
+	return nil
+}
+
+// CreateNameDictTable создает таблицу для словаря имён
+func (c *ManticoreClient) CreateNameDictTable(ctx context.Context) error {
+	sql := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+        id bigint,
+        name text,
+        geohashes_uint64 multi64,
+        geohashes_string text,
+        occurrences int,
+        first_geoname_id bigint
+    ) 
+    morphology='lemmatize_ru_all, stem_enru'
+    min_infix_len='2'
+    html_strip='1'`, TableNameDict)
+
+	req := c.client.UtilsAPI.Sql(ctx).Body(sql)
+	req = req.RawResponse(true)
+
+	_, httpResp, err := c.client.UtilsAPI.SqlExecute(req)
+	if err != nil {
+		return fmt.Errorf("failed to create %v table: %w", TableNameDict, err)
+	}
+
+	if httpResp != nil && httpResp.StatusCode != 200 {
+		return fmt.Errorf("create %v table returned HTTP %d", TableNameDict, httpResp.StatusCode)
+	}
+
+	log.Printf("Created %v table (CreateNameDictTable)", TableNameDict)
 	return nil
 }

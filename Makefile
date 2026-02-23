@@ -43,6 +43,10 @@ hierarchy:
 paths:
 	go run cmd/build_paths/main.go
 
+# Построение словаря имён
+name-dict:
+	go run cmd/build_name_dict/main.go
+
 # Полный цикл: импорт + иерархия + пути
 full:
 	make import

@@ -31,6 +31,10 @@ type Config struct {
 
 	// S2 Geometry
 	S2GeohashLevel int // уровень точности геохеша (по умолчанию 9)
+
+	// Language filters for name dictionary
+	ExcludeCJK    bool // исключать китайские, японские, корейские иероглифы
+	ExcludeArabic bool // исключать арабские символы
 }
 
 func Load() (*Config, error) {
@@ -55,6 +59,9 @@ func Load() (*Config, error) {
 		UpdateEnabled: getEnvAsBool("UPDATE_ENABLED", false),
 
 		S2GeohashLevel: getEnvAsInt("S2_GEOHASH_LEVEL", 9), // 9 уровень по умолчанию
+
+		ExcludeCJK:    getEnvAsBool("EXCLUDE_CJK", true),
+		ExcludeArabic: getEnvAsBool("EXCLUDE_ARABIC", true),
 	}
 
 	return cfg, nil
