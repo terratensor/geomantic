@@ -111,14 +111,26 @@ func (b *NameDictBuilder) BuildDictionary(ctx context.Context) error {
 	return nil
 }
 
-// loadAllGeonames загружает все записи из geonames
+// loadAllGeonames загружает записи из geonames
 func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, error) {
 	var result []*GeoNameInfo
 	lastID := int64(0)
-	limit := 5000
+	limit := 100000
 	maxRetries := 5
+	testMode := false     // Временно для тестирования
+	maxRecords := 1000000 // Ограничение для теста
+
+	// Получаем общее количество для информации
+	if testMode {
+		log.Printf("TEST MODE: will load only %d records", maxRecords)
+	}
 
 	for {
+		if testMode && len(result) >= maxRecords {
+			log.Printf("Reached test limit of %d records, stopping", maxRecords)
+			break
+		}
+
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()
@@ -128,9 +140,11 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
 		query := fmt.Sprintf(`
             SELECT id, name, alternatenames, geohash_string, geohash_int
             FROM geonames
-            WHERE id > %d
+            WHERE id > %d			
             ORDER BY id ASC
-            LIMIT %d`, lastID, limit)
+            LIMIT %d
+			OPTION max_matches=%d
+			`, lastID, limit, limit)
 
 		var rows []map[string]interface{}
 		var err error
@@ -171,27 +185,28 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
 
 		batchLoaded := 0
 		for _, row := range rows {
+			// Проверка лимита теста
+			if testMode && len(result) >= maxRecords {
+				break
+			}
+
 			// Безопасное извлечение ID
 			idVal, ok := row["id"]
 			if !ok || idVal == nil {
-				log.Printf("Warning: row has no id, skipping")
 				continue
 			}
 			idFloat, ok := idVal.(float64)
 			if !ok {
-				log.Printf("Warning: id is not float64: %T, skipping", idVal)
 				continue
 			}
 
 			// Безопасное извлечение name
 			nameVal, ok := row["name"]
 			if !ok || nameVal == nil {
-				log.Printf("Warning: row %d has no name, skipping", int64(idFloat))
 				continue
 			}
 			name, ok := nameVal.(string)
 			if !ok {
-				log.Printf("Warning: name is not string for id %d: %T", int64(idFloat), nameVal)
 				continue
 			}
 
@@ -227,7 +242,6 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
 			break
 		}
 
-		// Небольшая задержка между батчами
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -238,10 +252,20 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
 func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64][]*AltNameInfo, error) {
 	result := make(map[int64][]*AltNameInfo)
 	lastID := int64(0)
-	limit := 1000
-	maxRetries := 50
+	limit := 100000
+	maxRetries := 5
+	testMode := false
+	maxRecords := 1000000
+
+	// Для отслеживания, сколько уникальных geonameid мы уже обработали
+	processedGeonameIDs := make(map[int64]bool)
 
 	for {
+		if testMode && len(processedGeonameIDs) >= maxRecords {
+			log.Printf("Reached test limit of %d unique geonameid, stopping", maxRecords)
+			break
+		}
+
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()
@@ -253,12 +277,13 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
             FROM alternate_names
             WHERE id > %d
             ORDER BY id ASC
-            LIMIT %d`, lastID, limit)
+            LIMIT %d
+			OPTION max_matches=%d
+			`, lastID, limit, limit)
 
 		var rows []map[string]interface{}
 		var err error
 
-		// Пытаемся выполнить запрос с повторными попытками
 		retrySuccess := false
 		for attempt := 0; attempt < maxRetries; attempt++ {
 			if attempt > 0 {
@@ -274,10 +299,8 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
 				break
 			}
 
-			// Проверяем, является ли ошибка EOF (обрыв соединения)
 			if strings.Contains(err.Error(), "EOF") {
 				log.Printf("Connection lost (attempt %d): %v", attempt+1, err)
-				// Создаём новый HTTP клиент для следующей попытки
 				b.httpClient = &http.Client{Timeout: 60 * time.Second}
 			} else {
 				log.Printf("Batch failed (attempt %d): %v", attempt+1, err)
@@ -296,57 +319,57 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
 
 		batchLoaded := 0
 		for _, row := range rows {
-			// Получаем ID
+			// Проверка лимита теста
+			if testMode && len(processedGeonameIDs) >= maxRecords {
+				break
+			}
+
 			idVal, ok := row["id"]
 			if !ok || idVal == nil {
 				continue
 			}
-
 			idFloat, ok := idVal.(float64)
 			if !ok {
 				continue
 			}
 
-			// Получаем geonameid
 			geonameidVal, ok := row["geonameid"]
 			if !ok || geonameidVal == nil {
 				continue
 			}
-
 			geonameidFloat, ok := geonameidVal.(float64)
 			if !ok {
 				continue
 			}
+			geonameID := int64(geonameidFloat)
 
-			// Получаем alternatename
 			altNameVal, ok := row["alternatename"]
 			if !ok || altNameVal == nil {
 				continue
 			}
-
 			altName, ok := altNameVal.(string)
 			if !ok || altName == "" {
 				continue
 			}
 
 			alt := &AltNameInfo{
-				GeonameID:     int64(geonameidFloat),
+				GeonameID:     geonameID,
 				AlternateName: altName,
 			}
 
-			result[alt.GeonameID] = append(result[alt.GeonameID], alt)
+			result[geonameID] = append(result[geonameID], alt)
+			processedGeonameIDs[geonameID] = true
 			lastID = int64(idFloat)
 			batchLoaded++
 		}
 
-		log.Printf("Loaded %d alternate names (total groups: %d, lastID: %d)...",
-			batchLoaded, len(result), lastID)
+		log.Printf("Loaded %d alternate names (total unique geonameid: %d, lastID: %d)...",
+			batchLoaded, len(processedGeonameIDs), lastID)
 
 		if len(rows) < limit {
 			break
 		}
 
-		// Небольшая задержка между батчами
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -355,7 +378,7 @@ func (b *NameDictBuilder) loadAllAlternateNames(ctx context.Context) (map[int64]
 
 // fetchRows выполняет SQL запрос и возвращает слайс строк
 func (b *NameDictBuilder) fetchRows(ctx context.Context, query string) ([]map[string]interface{}, error) {
-	log.Printf("Executing query: %s", query)
+	// log.Printf("Executing query: %s", query)
 
 	resp, err := b.httpClient.Post(
 		fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
@@ -419,10 +442,10 @@ func (b *NameDictBuilder) fetchRows(ctx context.Context, query string) ([]map[st
 		rows = append(rows, row)
 	}
 
-	log.Printf("Fetched %d rows", len(rows))
-	if len(rows) > 0 {
-		log.Printf("Sample row: %+v", rows[0])
-	}
+	// log.Printf("Fetched %d rows", len(rows))
+	// if len(rows) > 0 {
+	// 	log.Printf("Sample row: %+v", rows[0])
+	// }
 
 	return rows, nil
 }
@@ -436,12 +459,13 @@ func (b *NameDictBuilder) addGeoNameToMap(
 ) {
 	if !b.shouldInclude(name) {
 		if strings.ContainsAny(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
-			log.Printf("WARNING: Latin name '%s' rejected by shouldInclude", name)
+			// log.Printf("WARNING: Latin name '%s' rejected by shouldInclude", name)
 		}
 		return
 	}
 
-	normalizedKey := normalizeName(name)
+	// normalizedKey := normalizeName(name)
+	normalizedKey := name
 
 	entry, exists := nameMap[normalizedKey]
 	if !exists {
@@ -464,11 +488,20 @@ func (b *NameDictBuilder) addGeoNameToMap(
 
 // saveNameMap сохраняет nameMap в Manticore батчами
 func (b *NameDictBuilder) saveNameMap(ctx context.Context, nameMap map[string]*NameEntry) error {
-	batchSize := 5000
+	batchSize := 10000
 	batch := make([]map[string]interface{}, 0, batchSize)
 	id := time.Now().UnixNano()
 
-	for _, entry := range nameMap {
+	problemDoc := 0
+	for normalizedKey, entry := range nameMap {
+		// Пропускаем если нет геохешей
+		if len(entry.GeohashesInt) == 0 {
+			log.Printf("DEBUG: No geohashes for '%s' (original: '%s')",
+				normalizedKey, entry.OriginalName)
+			continue
+		}
+
+		// Конвертируем map геохешей в slice
 		geohashesInt := make([]uint64, 0, len(entry.GeohashesInt))
 		for gh := range entry.GeohashesInt {
 			if gh > 0 {
@@ -476,11 +509,30 @@ func (b *NameDictBuilder) saveNameMap(ctx context.Context, nameMap map[string]*N
 			}
 		}
 
+		// Проверка: точно ли это массив?
 		if len(geohashesInt) == 0 {
+			log.Printf("DEBUG: Empty geohashes after conversion for '%s'", entry.OriginalName)
 			continue
 		}
 
+		// Дополнительная проверка на одиночное значение
+		if len(geohashesInt) == 1 {
+			// Для одного элемента это всё ещё должен быть массив
+			// log.Printf("DEBUG: Single geohash for '%s': %d", entry.OriginalName, geohashesInt[0])
+		}
+
+		// Сортируем
 		sort.Slice(geohashesInt, func(i, j int) bool { return geohashesInt[i] < geohashesInt[j] })
+
+		// Убираем дубликаты
+		uniqueGeo := make([]uint64, 0, len(geohashesInt))
+		seen := make(map[uint64]bool)
+		for _, gh := range geohashesInt {
+			if !seen[gh] {
+				seen[gh] = true
+				uniqueGeo = append(uniqueGeo, gh)
+			}
+		}
 
 		geohashesStr := make([]string, 0, len(entry.GeohashesString))
 		for gh := range entry.GeohashesString {
@@ -490,28 +542,64 @@ func (b *NameDictBuilder) saveNameMap(ctx context.Context, nameMap map[string]*N
 		}
 		sort.Strings(geohashesStr)
 
+		// Уникализация строк
+		uniqueStr := make([]string, 0, len(geohashesStr))
+		seenStr := make(map[string]bool)
+		for _, gh := range geohashesStr {
+			if !seenStr[gh] {
+				seenStr[gh] = true
+				uniqueStr = append(uniqueStr, gh)
+			}
+		}
+
+		// mvaArray := make([]interface{}, len(uniqueGeo))
+		// for i, v := range uniqueGeo {
+		// 	mvaArray[i] = v
+		// }
+
+		geohashesInt64 := make([]int64, len(uniqueGeo))
+		for i, v := range uniqueGeo {
+			geohashesInt64[i] = int64(v)
+		}
+
 		doc := map[string]interface{}{
 			"id":               id,
 			"name":             entry.OriginalName,
-			"geohashes_uint64": geohashesInt,
-			"geohashes_string": strings.Join(geohashesStr, ","),
-			"occurrences":      len(geohashesInt),
+			"geohashes_uint64": geohashesInt64,
+			"geohashes_string": strings.Join(uniqueStr, ","),
+			"occurrences":      len(uniqueGeo),
 			"first_geoname_id": entry.FirstSeen,
+		}
+
+		// Проверим этот конкретный документ на всякий случай
+		problemDoc++
+		if problemDoc <= 5 {
+			log.Printf("DEBUG Doc %d: %+v", problemDoc, doc)
 		}
 
 		batch = append(batch, doc)
 		id++
 
 		if len(batch) >= batchSize {
+			log.Printf("Inserting batch of %d documents...", len(batch))
 			if err := b.client.BulkInsertNames(ctx, batch); err != nil {
+				// При ошибке покажем проблемные документы
+				// for i, badDoc := range batch {
+				// 	log.Printf("Problem doc %d in batch: %+v", i, badDoc)
+				// }
 				return err
 			}
 			batch = batch[:0]
 		}
 	}
 
+	// Финальный батч
 	if len(batch) > 0 {
+		log.Printf("Inserting final batch of %d documents...", len(batch))
 		if err := b.client.BulkInsertNames(ctx, batch); err != nil {
+			for i, badDoc := range batch {
+				log.Printf("Problem doc %d in final batch: %+v", i, badDoc)
+			}
 			return err
 		}
 	}
@@ -720,6 +808,9 @@ func (b *NameDictBuilder) addNameToMap(
 ) {
 	// Проверяем, нужно ли включать имя
 	if !b.shouldInclude(name) {
+		if strings.ContainsAny(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") {
+			log.Printf("WARNING: Latin name '%s' rejected by shouldInclude", name)
+		}
 		return
 	}
 
@@ -799,10 +890,15 @@ func (b *NameDictBuilder) convertToDocuments(batchMap map[string]*NameEntry) []m
 			}
 		}
 
+		mvaArray := make([]interface{}, len(uniqueGeo))
+		for i, v := range uniqueGeo {
+			mvaArray[i] = v
+		}
+
 		doc := map[string]interface{}{
 			"id":               id,
 			"name":             entry.OriginalName, // Используем оригинальное имя
-			"geohashes_uint64": uniqueGeo,
+			"geohashes_uint64": mvaArray,
 			"geohashes_string": strings.Join(uniqueStr, ","),
 			"occurrences":      len(uniqueGeo),
 			"first_geoname_id": entry.FirstSeen,
