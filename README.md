@@ -88,7 +88,7 @@
 
 ```bash
 # Клонировать репозиторий
-git clone https://github.com/yourusername/geomantic.git
+git clone https://github.com/terratensor/geomantic.git
 cd geomantic
 
 # Инициализировать проект

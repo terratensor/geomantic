@@ -1,2 +1,3 @@
 docker/manticore/*
 data
+.env
