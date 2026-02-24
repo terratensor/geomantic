@@ -79,7 +79,7 @@ func (b *PathBuilder) loadRelations(ctx context.Context) error {
 	log.Println("Loading hierarchy relations...")
 
 	lastID := int64(0)
-	limit := 1000
+	limit := 100000
 	total := 0
 	maxRetries := 3
 
@@ -156,7 +156,8 @@ func (b *PathBuilder) fetchHierarchyBatch(ctx context.Context, lastID int64, lim
 		"sort": []map[string]string{
 			{"id": "asc"},
 		},
-		"size": limit,
+		"size":        limit,
+		"max_matches": limit,
 	}
 
 	body, _ := json.Marshal(searchReq)
@@ -201,7 +202,7 @@ func (b *PathBuilder) loadGeonamesNames(ctx context.Context) error {
 	log.Println("Loading geonames names...")
 
 	lastID := int64(0)
-	limit := 1000
+	limit := 100000
 	total := 0
 	maxRetries := 3
 
@@ -279,7 +280,8 @@ func (b *PathBuilder) fetchGeonamesBatch(ctx context.Context, lastID int64, limi
 		"sort": []map[string]string{
 			{"id": "asc"},
 		},
-		"size": limit,
+		"size":        limit,
+		"max_matches": limit,
 	}
 
 	body, _ := json.Marshal(searchReq)
@@ -346,7 +348,7 @@ func (b *PathBuilder) buildMaterializedPaths(ctx context.Context) error {
 	roots := b.findRoots()
 	log.Printf("Found %d root nodes", len(roots))
 
-	batchSize := 1000
+	batchSize := 10000
 	pathBatch := make([]map[string]interface{}, 0, batchSize)
 	updateBatch := make([]map[string]interface{}, 0, batchSize)
 	totalNodes := 0
