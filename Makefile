@@ -84,3 +84,23 @@ rebuild-geonames:
 	make hierarchy
 	make paths		
 
+# Export geoname_dict to CSV (default location)
+export-csv:
+	go run cmd/export_dict/main.go
+
+# Export to specific file
+export-to:
+	go run cmd/export_dict/main.go -output $(FILE)
+
+# Export with custom format
+export-format:
+	go run cmd/export_dict/main.go -format $(FORMAT) -output $(FILE)
+
+# Quick export to current directory
+export-here:
+	go run cmd/export_dict/main.go -output ./geoname_dict.csv
+
+# Export directory will be created automatically
+export-dir:
+	@echo "Export directory: ./export"
+	@ls -la export/ 2>/dev/null || echo "No exports yet"
