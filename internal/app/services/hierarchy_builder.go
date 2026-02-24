@@ -80,7 +80,7 @@ func (b *HierarchyBuilder) BuildHierarchy(ctx context.Context) error {
 func (b *HierarchyBuilder) loadGeonames(ctx context.Context) error {
 	log.Println("Loading geonames from Manticore with ID-based pagination...")
 
-	limit := 1000
+	limit := 100000
 	lastID := int64(0)
 	totalLoaded := 0
 	maxRetries := 3
@@ -130,8 +130,8 @@ func (b *HierarchyBuilder) loadGeonames(ctx context.Context) error {
 func (b *HierarchyBuilder) loadGeonamesBatch(ctx context.Context, lastID int64, limit int) (int, error) {
 	query := fmt.Sprintf(
 		"SELECT id, name, country_code, feature_code, admin1_code, admin2_code, admin3_code, admin4_code "+
-			"FROM geonames WHERE id > %d ORDER BY id ASC LIMIT %d",
-		lastID, limit)
+			"FROM geonames WHERE id > %d ORDER BY id ASC LIMIT %d OPTION max_matches=%d",
+		lastID, limit, limit)
 
 	// Создаем новый HTTP клиент для каждого запроса с таймаутом
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -218,89 +218,137 @@ func (b *HierarchyBuilder) loadAdminCodes(ctx context.Context) error {
 	return nil
 }
 
-// loadHierarchyRelations загружает связи из таблицы hierarchy
+// loadHierarchyRelations загружает все связи из таблицы hierarchy
 func (b *HierarchyBuilder) loadHierarchyRelations(ctx context.Context) error {
 	log.Println("Loading hierarchy relations from Manticore...")
 
-	offset := 0
-	limit := 1000
+	lastID := int64(0)
+	limit := 100000
+	maxRetries := 3
+	total := 0
 
 	for {
-		// Используем тот же формат для поиска
-		searchReq := map[string]interface{}{
-			"index": "hierarchy",
-			"query": map[string]interface{}{
-				"match_all": map[string]interface{}{},
-			},
-			"_source": []interface{}{
-				"parent_id", "child_id", "relation_type",
-			},
-			"size": limit,
-			"from": offset,
+		query := fmt.Sprintf(`
+            SELECT id, parent_id, child_id, relation_type
+            FROM hierarchy
+            WHERE id > %d
+            ORDER BY id ASC
+            LIMIT %d
+            OPTION max_matches=%d`, lastID, limit, limit)
+
+		var rows []map[string]interface{}
+		var err error
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				waitTime := time.Second * time.Duration(attempt+1)
+				log.Printf("Retry %d for hierarchy relations after %v", attempt+1, waitTime)
+				time.Sleep(waitTime)
+			}
+
+			rows, err = b.fetchRows(ctx, query)
+			if err == nil {
+				break
+			}
 		}
 
-		body, err := json.Marshal(searchReq)
 		if err != nil {
-			return fmt.Errorf("failed to marshal search request: %w", err)
+			return fmt.Errorf("failed to load hierarchy relations: %w", err)
 		}
 
-		resp, err := b.httpClient.Post(
-			fmt.Sprintf("http://%s:%d/json/search", b.cfg.ManticoreHost, b.cfg.ManticorePort),
-			"application/json",
-			bytes.NewReader(body),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to search hierarchy: %w", err)
-		}
-
-		var result map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return fmt.Errorf("failed to decode response: %w", err)
-		}
-		resp.Body.Close()
-
-		hits, ok := result["hits"].(map[string]interface{})
-		if !ok {
+		if len(rows) == 0 {
 			break
 		}
 
-		hitsList, ok := hits["hits"].([]interface{})
-		if !ok || len(hitsList) == 0 {
-			break
-		}
-
-		for _, hit := range hitsList {
-			hitMap, ok := hit.(map[string]interface{})
+		for _, row := range rows {
+			idVal, ok := row["id"].(float64)
 			if !ok {
 				continue
 			}
+			rowID := int64(idVal)
 
-			source, ok := hitMap["_source"].(map[string]interface{})
+			parentIDVal, ok := row["parent_id"].(float64)
 			if !ok {
-				source, ok = hitMap["doc"].(map[string]interface{})
-				if !ok {
-					continue
-				}
+				continue
 			}
+			parentID := int64(parentIDVal)
 
-			parentID := int64(source["parent_id"].(float64))
-			childID := int64(source["child_id"].(float64))
-			//relType, _ := source["relation_type"].(string)
+			childIDVal, ok := row["child_id"].(float64)
+			if !ok {
+				continue
+			}
+			childID := int64(childIDVal)
+
+			// relType, _ := row["relation_type"].(string)
 
 			b.relations[parentID] = append(b.relations[parentID], childID)
 			b.parentMap[childID] = parentID
+			total++
+			lastID = rowID
 		}
 
-		offset += limit
+		log.Printf("Loaded %d hierarchy relations (total: %d)", len(rows), total)
 
-		if len(hitsList) < limit {
+		if len(rows) < limit {
 			break
 		}
 	}
 
-	log.Printf("Loaded %d hierarchy relations", len(b.parentMap))
+	log.Printf("Loaded %d hierarchy relations total", total)
 	return nil
+}
+
+// Вспомогательная функция fetchRows (если ещё нет)
+func (b *HierarchyBuilder) fetchRows(ctx context.Context, query string) ([]map[string]interface{}, error) {
+	resp, err := b.httpClient.Post(
+		fmt.Sprintf("http://%s:%d/sql", b.cfg.ManticoreHost, b.cfg.ManticorePort),
+		"text/plain",
+		strings.NewReader(query),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP status %d", resp.StatusCode)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	hits, ok := result["hits"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	hitsList, ok := hits["hits"].([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	rows := make([]map[string]interface{}, 0, len(hitsList))
+	for _, hit := range hitsList {
+		hitMap := hit.(map[string]interface{})
+
+		row := make(map[string]interface{})
+
+		if id, ok := hitMap["_id"]; ok {
+			row["id"] = id
+		}
+
+		if source, ok := hitMap["_source"].(map[string]interface{}); ok {
+			for k, v := range source {
+				row[k] = v
+			}
+		}
+
+		rows = append(rows, row)
+	}
+
+	return rows, nil
 }
 
 // buildAdminHierarchy строит иерархию на основе admin кодов
@@ -383,7 +431,7 @@ func (b *HierarchyBuilder) findParentByAdminCodes(geoname map[string]interface{}
 func (b *HierarchyBuilder) updateParentIDs(ctx context.Context) error {
 	log.Println("Updating parent IDs in Manticore...")
 
-	batchSize := 100
+	batchSize := 20000
 	batch := make([]map[string]interface{}, 0, batchSize)
 	updated := 0
 
@@ -495,14 +543,4 @@ func (b *HierarchyBuilder) CheckData(ctx context.Context) error {
 	log.Printf("Geonames check response: %+v", result)
 
 	return nil
-}
-
-// getName получает имя геонима из кэша
-func (b *HierarchyBuilder) getName(geonameID int64) (string, bool) {
-	if geoname, ok := b.geonameCache[geonameID]; ok {
-		if name, ok := geoname["name"].(string); ok {
-			return name, true
-		}
-	}
-	return "", false
 }
