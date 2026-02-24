@@ -17,7 +17,7 @@ update:
 # Очистка данных
 clean:
 	rm -rf data/*
-	docker compose -f docker/docker-compose.yml down -v
+# 	docker compose -f docker/docker-compose.yml down -v
 
 # Запуск Manticore
 docker-up:
