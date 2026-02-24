@@ -135,7 +135,7 @@ curl http://localhost:9309/sql -d "SELECT COUNT(*) FROM geoname_dict"
 
 Файл содержит все уникальные имена из GeoNames (~50M записей) с привязанными геохешами уровня 9.
 
-- **Файл**: [`export/geoname_dict_20260224_203501.csv.gz`](./export/)
+- **Файл**: [`export/geoname_dict_20260224_203501.csv.gz`](../export/geoname_dict_20260224_203501.csv.gz)
 - **Размер**: ~350 MB (сжатый gzip)
 - **Формат**: CSV с заголовком
 - **Колонки**: `name`, `geohashes_string`, `geohashes_uint64`, `occurrences`, `first_geoname_id`
