@@ -1,0 +1,4 @@
+*.csv filter=lfs diff=lfs merge=lfs -text
+*.csv.gz filter=lfs diff=lfs merge=lfs -text
+export/*.csv filter=lfs diff=lfs merge=lfs -text
+export/*.csv.gz filter=lfs diff=lfs merge=lfs -text
