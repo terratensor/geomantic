@@ -38,6 +38,9 @@ type Config struct {
 
 	// Name normalization
 	NormalizeNames bool // нормализация диакритических знаков
+
+	// Percolate settings
+	PercolateBatchSize int
 }
 
 func Load() (*Config, error) {
@@ -67,6 +70,8 @@ func Load() (*Config, error) {
 		ExcludeArabic: getEnvAsBool("EXCLUDE_ARABIC", true),
 
 		NormalizeNames: getEnvAsBool("NORMALIZE_NAMES", false),
+
+		PercolateBatchSize: getEnvAsInt("PERCOLATE_BATCH_SIZE", 10000),
 	}
 
 	return cfg, nil

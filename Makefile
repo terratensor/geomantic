@@ -104,3 +104,7 @@ export-here:
 export-dir:
 	@echo "Export directory: ./export"
 	@ls -la export/ 2>/dev/null || echo "No exports yet"
+
+# Build percolate table from geoname_dict
+percolate:
+	go run cmd/build_percolate/main.go

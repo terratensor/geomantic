@@ -21,6 +21,7 @@ const (
 	TableHierarchy      = "hierarchy"
 	TableAdminCodes     = "admin_codes"
 	TableNameDict       = "geoname_dict"
+	TableGeonameDictPQ  = "geoname_dict_pq"
 )
 
 var CreateTablesSQL = []string{
