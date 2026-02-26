@@ -50,13 +50,15 @@ var CreateTablesSQL = []string{
         full_text text,
 		geohash_int bigint,
         geohash_string string attribute indexed
-    ) 
+    )
+	charset_table = 'non_cont'
+	ignore_chars = 'U+0300..U+036F'
+	min_infix_len='3'
+	index_exact_words='1'
+	html_strip = '1'
     morphology='lemmatize_ru_all, stem_enru'
     min_stemming_len='4'
-    index_exact_words='1'
-    min_infix_len='3'
-    expand_keywords='1'
-    html_strip='1'`, TableGeonames),
+	expand_keywords='1'`, TableGeonames),
 
 	// Таблица альтернативных имен
 	fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
@@ -73,9 +75,14 @@ var CreateTablesSQL = []string{
         language_group string,
         is_official bool
     )
+	charset_table = 'non_cont'
+	ignore_chars = 'U+0300..U+036F'
+	min_infix_len='3'
+	index_exact_words='1'
+	html_strip = '1'
     morphology='lemmatize_ru_all, stem_enru'
-    min_infix_len='2'
-    index_exact_words='1'`, TableAlternateNames),
+    min_stemming_len='4'
+	expand_keywords='1'`, TableAlternateNames),
 
 	// Таблица иерархии
 	`CREATE TABLE IF NOT EXISTS hierarchy (
@@ -117,9 +124,14 @@ var CreateTablesSQL = []string{
         occurrences int,
         first_geoname_id bigint
     ) 
+    charset_table = 'non_cont'
+	ignore_chars = 'U+0300..U+036F'
+	min_infix_len='3'
+	index_exact_words='1'
+	html_strip = '1'
     morphology='lemmatize_ru_all, stem_enru'
-    min_infix_len='2'
-    html_strip='1'`, TableNameDict),
+    min_stemming_len='4'
+	expand_keywords='1'`, TableNameDict),
 }
 
 type ManticoreClient struct {
@@ -791,9 +803,14 @@ func (c *ManticoreClient) createNameDictTable(ctx context.Context) error {
         occurrences int,
         first_geoname_id bigint
     ) 
+   	charset_table = 'non_cont'
+	ignore_chars = 'U+0300..U+036F'
+	min_infix_len='3'
+	index_exact_words='1'
+	html_strip = '1'
     morphology='lemmatize_ru_all, stem_enru'
-    min_infix_len='2'
-    html_strip='1'`, TableNameDict)
+    min_stemming_len='4'
+	expand_keywords='1'`, TableNameDict)
 
 	req := c.client.UtilsAPI.Sql(ctx).Body(sql)
 	req = req.RawResponse(true)
@@ -821,9 +838,14 @@ func (c *ManticoreClient) CreateNameDictTable(ctx context.Context) error {
         occurrences int,
         first_geoname_id bigint
     ) 
+    charset_table = 'non_cont'
+	ignore_chars = 'U+0300..U+036F'
+	min_infix_len='3'
+	index_exact_words='1'
+	html_strip = '1'
     morphology='lemmatize_ru_all, stem_enru'
-    min_infix_len='2'
-    html_strip='1'`, TableNameDict)
+    min_stemming_len='4'
+	expand_keywords='1'`, TableNameDict)
 
 	req := c.client.UtilsAPI.Sql(ctx).Body(sql)
 	req = req.RawResponse(true)
