@@ -666,21 +666,26 @@ func (b *NameDictBuilder) shouldInclude(name string) bool {
 	return true
 }
 
-// isCJKRune определяет, является ли руна CJK иероглифом
+// isCJKRune определяет, является ли руна CJK/восточноазиатским символом
 func isCJKRune(r rune) bool {
-	// Основные диапазоны CJK
 	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
-		(r >= 0x3400 && r <= 0x4DBF) || // CJK Unified Ideographs Extension A
-		(r >= 0x20000 && r <= 0x2A6DF) || // CJK Unified Ideographs Extension B
-		(r >= 0x2A700 && r <= 0x2B73F) || // CJK Unified Ideographs Extension C
-		(r >= 0x2B740 && r <= 0x2B81F) || // CJK Unified Ideographs Extension D
-		(r >= 0x2B820 && r <= 0x2CEAF) || // CJK Unified Ideographs Extension E
-		(r >= 0x2CEB0 && r <= 0x2EBEF) || // CJK Unified Ideographs Extension F
+		(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
+		(r >= 0x20000 && r <= 0x2A6DF) || // Extension B
+		(r >= 0x2A700 && r <= 0x2B73F) || // Extension C
+		(r >= 0x2B740 && r <= 0x2B81F) || // Extension D
+		(r >= 0x2B820 && r <= 0x2CEAF) || // Extension E
+		(r >= 0x2CEB0 && r <= 0x2EBEF) || // Extension F
 		(r >= 0x3000 && r <= 0x303F) || // CJK Symbols and Punctuation
 		(r >= 0x3040 && r <= 0x309F) || // Hiragana
 		(r >= 0x30A0 && r <= 0x30FF) || // Katakana
 		(r >= 0x31F0 && r <= 0x31FF) || // Katakana Phonetic Extensions
-		(r >= 0xFF00 && r <= 0xFFEF) // Halfwidth and Fullwidth Forms
+		(r >= 0xFF00 && r <= 0xFFEF) || // Halfwidth and Fullwidth Forms
+		// === КОРЕЙСКИЙ HANGUL (ДОБАВЛЕНО) ===
+		(r >= 0x1100 && r <= 0x11FF) || // Hangul Jamo
+		(r >= 0x3130 && r <= 0x318F) || // Hangul Compatibility Jamo
+		(r >= 0xA960 && r <= 0xA97F) || // Hangul Jamo Extended-A
+		(r >= 0xD7B0 && r <= 0xD7FF) || // Hangul Jamo Extended-B
+		(r >= 0xAC00 && r <= 0xD7AF) // Hangul Syllables ⭐ ГЛАВНЫЙ ДИАПАЗОН
 }
 
 // isArabicRune определяет, является ли руна арабским символом

@@ -19,6 +19,7 @@ type PercolateBuilder struct {
 	cfg        *config.Config
 	client     *manticore.ManticoreClient
 	httpClient *http.Client
+	excludeCJK bool
 }
 
 type DictRow struct {
@@ -32,6 +33,7 @@ func NewPercolateBuilder(cfg *config.Config, client *manticore.ManticoreClient) 
 		cfg:        cfg,
 		client:     client,
 		httpClient: &http.Client{Timeout: 60 * time.Second},
+		excludeCJK: cfg.ExcludeCJK,
 	}
 }
 
@@ -47,6 +49,7 @@ func (b *PercolateBuilder) Build(ctx context.Context) error {
 	limit := 100000
 	maxRetries := 5
 	total := 0
+	skippedCJK := 0
 
 	for {
 		select {
@@ -71,23 +74,34 @@ func (b *PercolateBuilder) Build(ctx context.Context) error {
 
 		for _, row := range rows {
 			if seen[row.ID] {
-				log.Printf("WARNING: duplicate ID %d in batch, skipping", row.ID)
 				continue
 			}
 			seen[row.ID] = true
 			uniqueRows = append(uniqueRows, row)
 		}
 
-		if len(uniqueRows) != len(rows) {
-			log.Printf("Removed %d duplicates from batch", len(rows)-len(uniqueRows))
+		// Фильтруем CJK имена
+		filteredRows := make([]DictRow, 0, len(uniqueRows))
+		for _, row := range uniqueRows {
+			if b.shouldInclude(row.Name) {
+				filteredRows = append(filteredRows, row)
+			} else {
+				skippedCJK++
+				if skippedCJK%1000 == 0 {
+					log.Printf("Skipped %d CJK names (example: %s)", skippedCJK, row.Name)
+				}
+			}
 		}
 
-		// Подготавливаем документы - удаляем все спецсимволы
-		docs := make([]map[string]interface{}, 0, len(uniqueRows))
-		for _, row := range uniqueRows {
-			// Удаляем все спецсимволы, оставляем только буквы, цифры и пробелы
-			cleanName := cleanQueryText(row.Name)
+		if len(filteredRows) == 0 {
+			lastID = uniqueRows[len(uniqueRows)-1].ID
+			continue
+		}
 
+		// Подготавливаем документы
+		docs := make([]map[string]interface{}, 0, len(filteredRows))
+		for _, row := range filteredRows {
+			cleanName := cleanQueryText(row.Name)
 			doc := map[string]interface{}{
 				"id":    row.ID,
 				"query": fmt.Sprintf(`"%s"`, cleanName),
@@ -95,6 +109,7 @@ func (b *PercolateBuilder) Build(ctx context.Context) error {
 			}
 			docs = append(docs, doc)
 		}
+
 		// Вставляем батчами
 		for i := 0; i < len(docs); i += b.cfg.PercolateBatchSize {
 			end := i + b.cfg.PercolateBatchSize
@@ -102,21 +117,14 @@ func (b *PercolateBuilder) Build(ctx context.Context) error {
 				end = len(docs)
 			}
 
-			// При ошибке, логируем весь проблемный батч
 			if err := b.client.BulkInsertPercolate(ctx, docs[i:end]); err != nil {
-				log.Printf("ERROR in batch. First 10 docs:")
-				for j, doc := range docs[i:end] {
-					if j < 10 {
-						log.Printf("  DOC %d: id=%v, query=%v", j, doc["id"], doc["query"])
-					}
-				}
 				return fmt.Errorf("failed to insert batch at offset %d: %w", i, err)
 			}
 		}
 
 		lastID = uniqueRows[len(uniqueRows)-1].ID
-		total += len(uniqueRows)
-		log.Printf("Processed %d records, lastID: %d", total, lastID)
+		total += len(filteredRows)
+		log.Printf("Processed %d records (skipped %d CJK), lastID: %d", total, skippedCJK, lastID)
 
 		if len(rows) < limit {
 			break
@@ -125,7 +133,7 @@ func (b *PercolateBuilder) Build(ctx context.Context) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	log.Printf("Percolate table built with %d queries in %v", total, time.Since(start))
+	log.Printf("Percolate table built with %d queries, skipped %d CJK names, in %v", total, skippedCJK, time.Since(start))
 	return nil
 }
 
@@ -277,24 +285,29 @@ func (b *PercolateBuilder) fetchRows(ctx context.Context, query string) ([]map[s
 	return rows, nil
 }
 
-// cleanQueryText удаляет все символы, кроме букв, цифр и пробелов
-func cleanQueryText(s string) string {
-	return strings.Map(func(r rune) rune {
-		// Оставляем буквы, цифры и пробелы
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
-			return r
+func (b *PercolateBuilder) shouldInclude(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	if b.excludeCJK {
+		for _, r := range name {
+			if isCJKRune(r) {
+				log.Printf("CJK DETECTED: %s contains %c (U+%X)", name, r, r)
+				return false
+			}
 		}
-		// Всё остальное удаляем
-		return -1
-	}, s)
+	}
+	return true
 }
 
-func escapeManticoreQuery(s string) string {
-	specialChars := []string{`!`, `"`, `$`, `'`, `(`, `)`, `/`, `<`, `@`, `\`, `^`, `|`, `~`}
-	// Убрали дефис из списка спецсимволов
-
-	for _, ch := range specialChars {
-		s = strings.ReplaceAll(s, ch, `\`+ch)
+// cleanQueryText удаляет все спецсимволы, оставляя буквы, цифры, пробелы и дефисы
+func cleanQueryText(s string) string {
+	var builder strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) || r == '-' {
+			builder.WriteRune(r)
+		}
 	}
-	return s
+	return builder.String()
 }
