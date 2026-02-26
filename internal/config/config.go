@@ -35,6 +35,9 @@ type Config struct {
 	// Language filters for name dictionary
 	ExcludeCJK    bool // исключать китайские, японские, корейские иероглифы
 	ExcludeArabic bool // исключать арабские символы
+
+	// Name normalization
+	NormalizeNames bool // нормализация диакритических знаков
 }
 
 func Load() (*Config, error) {
@@ -62,6 +65,8 @@ func Load() (*Config, error) {
 
 		ExcludeCJK:    getEnvAsBool("EXCLUDE_CJK", true),
 		ExcludeArabic: getEnvAsBool("EXCLUDE_ARABIC", true),
+
+		NormalizeNames: getEnvAsBool("NORMALIZE_NAMES", false),
 	}
 
 	return cfg, nil
