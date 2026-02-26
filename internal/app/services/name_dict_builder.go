@@ -36,20 +36,22 @@ type AltNameInfo struct {
 }
 
 type NameDictBuilder struct {
-	cfg           *config.Config
-	client        *manticore.ManticoreClient
-	httpClient    *http.Client
-	excludeCJK    bool
-	excludeArabic bool
+	cfg            *config.Config
+	client         *manticore.ManticoreClient
+	httpClient     *http.Client
+	excludeCJK     bool
+	excludeArabic  bool
+	normalizeNames bool
 }
 
 func NewNameDictBuilder(cfg *config.Config, client *manticore.ManticoreClient) *NameDictBuilder {
 	return &NameDictBuilder{
-		cfg:           cfg,
-		client:        client,
-		httpClient:    &http.Client{Timeout: 60 * time.Second},
-		excludeCJK:    cfg.ExcludeCJK,
-		excludeArabic: cfg.ExcludeArabic,
+		cfg:            cfg,
+		client:         client,
+		httpClient:     &http.Client{Timeout: 60 * time.Second},
+		excludeCJK:     cfg.ExcludeCJK,
+		excludeArabic:  cfg.ExcludeArabic,
+		normalizeNames: cfg.NormalizeNames,
 	}
 }
 
@@ -814,8 +816,13 @@ func (b *NameDictBuilder) addNameToMap(
 		return
 	}
 
+	normalizedKey := name
+	// Затем, если включено, применяем нормализацию диакритики
+	if b.normalizeNames {
+		normalizedKey = normalizeDiacritics(normalizedKey)
+	}
 	// Нормализуем имя для ключа
-	normalizedKey := normalizeName(name)
+	normalizedKey = normalizeName(name)
 
 	entry, exists := batchMap[normalizedKey]
 	if !exists {
