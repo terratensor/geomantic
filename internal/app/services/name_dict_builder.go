@@ -142,7 +142,8 @@ func (b *NameDictBuilder) loadAllGeonames(ctx context.Context) ([]*GeoNameInfo, 
 		query := fmt.Sprintf(`
             SELECT id, name, alternatenames, geohash_string, geohash_int
             FROM geonames
-            WHERE id > %d			
+            WHERE id > %d
+			AND feature_class = 'P'				
             ORDER BY id ASC
             LIMIT %d
 			OPTION max_matches=%d
@@ -666,7 +667,7 @@ func (b *NameDictBuilder) shouldInclude(name string) bool {
 	return true
 }
 
-// isCJKRune определяет, является ли руна CJK/восточноазиатским символом
+// isCJKRune определяет, является ли руна восточноазиатским символом (CJK + Thai + etc.)
 func isCJKRune(r rune) bool {
 	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
 		(r >= 0x3400 && r <= 0x4DBF) || // CJK Extension A
@@ -680,12 +681,15 @@ func isCJKRune(r rune) bool {
 		(r >= 0x30A0 && r <= 0x30FF) || // Katakana
 		(r >= 0x31F0 && r <= 0x31FF) || // Katakana Phonetic Extensions
 		(r >= 0xFF00 && r <= 0xFFEF) || // Halfwidth and Fullwidth Forms
-		// === КОРЕЙСКИЙ HANGUL (ДОБАВЛЕНО) ===
+		// Korean Hangul
 		(r >= 0x1100 && r <= 0x11FF) || // Hangul Jamo
 		(r >= 0x3130 && r <= 0x318F) || // Hangul Compatibility Jamo
 		(r >= 0xA960 && r <= 0xA97F) || // Hangul Jamo Extended-A
 		(r >= 0xD7B0 && r <= 0xD7FF) || // Hangul Jamo Extended-B
-		(r >= 0xAC00 && r <= 0xD7AF) // Hangul Syllables ⭐ ГЛАВНЫЙ ДИАПАЗОН
+		(r >= 0xAC00 && r <= 0xD7AF) || // Hangul Syllables ⭐
+		// === THAI (ДОБАВЛЕНО) ===
+		(r >= 0x0E00 && r <= 0x0E7F) || // Thai ⭐ ГЛАВНЫЙ ДИАПАЗОН
+		(r >= 0x0E80 && r <= 0x0EFF) // Lao (опционально, если нужно)
 }
 
 // isArabicRune определяет, является ли руна арабским символом
