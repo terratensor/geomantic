@@ -12,9 +12,9 @@ func (c *ManticoreClient) CreatePercolateTable(ctx context.Context) error {
     ) type='percolate' 
     charset_table = 'non_cont' 
     ignore_chars = 'U+0300..U+036F' 
-    min_infix_len='3' 
+    min_infix_len='0' 
     index_exact_words='1' 
-    morphology='lemmatize_ru_all, stem_enru' 
+    morphology='lemmatize_ru, stem_en' 
     min_stemming_len='4'`, TableGeonameDictPQ)
 
 	req := c.client.UtilsAPI.Sql(ctx).Body(sql).RawResponse(true)
