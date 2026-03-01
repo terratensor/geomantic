@@ -62,3 +62,35 @@ func TestIsCJKRune_Comprehensive(t *testing.T) {
 		})
 	}
 }
+
+func TestThaiFiltering(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool // shouldInclude результат при excludeCJK=true
+	}{
+		// Тайские слова — должны фильтроваться
+		{"Thai 1", "สถานอนามยตำบลบางพนแหงท 2", false},
+		{"Thai 2", "คลองนายกรม สาย 3", false},
+		{"Thai 3", "ภาค 1", false},
+		{"Thai single", "ส", false}, // U+0E2A
+
+		// Латиница/цифры — должны проходить
+		{"Latin", "Bangkok", true},
+		{"Digits", "123", true},
+
+		// Кириллица — должна проходить (если не добавили Cyrillic в исключения!)
+		{"Cyrillic И", "И", true},
+		{"Cyrillic Москва", "Москва", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := &NameDictBuilder{excludeCJK: true, excludeArabic: false}
+			got := builder.shouldInclude(tt.input)
+			if got != tt.expected {
+				t.Errorf("shouldInclude(%q) = %v; want %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
